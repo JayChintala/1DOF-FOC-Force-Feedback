@@ -1,0 +1,5 @@
+(sym_lib_table
+	(version 7)
+	(lib (name "my_components") (type "KiCad") (uri "${KIPRJMOD}/libraries/my_components.kicad_sym") (options "") (descr ""))
+	(lib (name "AS5600_imported") (type "KiCad") (uri "${KIPRJMOD}/libraries/AS5600_imported.kicad_sym") (options "") (descr ""))
+)
