@@ -46,3 +46,29 @@ fp-info-cache
 .log
 .wbdef
 
+
+# STM32CubeMX / ST Motor Control Workbench
+*.log
+*.settings
+*.extSettings
+*.swp
+*.swo
+*~
+
+# Build artifacts
+*.o
+*.a
+*.elf
+*.hex
+*.bin
+
+# IDE cache
+.metadata/
+.cproject
+.project
+*.launch
+
+# Object files
+Debug/
+Release/
+build/
