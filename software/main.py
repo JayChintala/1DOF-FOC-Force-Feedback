@@ -4,7 +4,7 @@ from config import Kt, r, CAN_CHANNEL, CAN_BITRATE, NODE_SENSE, NODE_REPLICATE, 
 from can_utils import read_Iq, send_torque
 
 def main():
-    bus = can.interface.Bus(channel=CAN_CHANNEL, bustype='socketcan')
+    bus = can.interface.Bus(channel='can0', interface='socketcan')
     
     print("Taring force sensor...")
     time.sleep(0.5)
