@@ -46,8 +46,17 @@ fp-info-cache
 .log
 .wbdef
 
+# STM32CubeMX / ST Motor Control Workbench - Keep ONLY configs
+# IGNORE generated files (can be regenerated)
+STM32/MCWorkbench/Drivers/
+STM32/MCWorkbench/Inc/
+STM32/MCWorkbench/Src/
+STM32/MCWorkbench/MCSDK*/
+STM32/MCWorkbench/EWARM/
+STM32/MCWorkbench/STM32CubeIDE/
+STM32/MCWorkbench/.mxproject
 
-# STM32CubeMX / ST Motor Control Workbench
+# Logs and temp files
 *.log
 *.settings
 *.extSettings
@@ -56,19 +65,11 @@ fp-info-cache
 *~
 
 # Build artifacts
+Debug/
+Release/
+build/
 *.o
 *.a
 *.elf
 *.hex
 *.bin
-
-# IDE cache
-.metadata/
-.cproject
-.project
-*.launch
-
-# Object files
-Debug/
-Release/
-build/
