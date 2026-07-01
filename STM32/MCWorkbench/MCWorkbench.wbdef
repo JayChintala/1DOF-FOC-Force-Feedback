@@ -180,7 +180,7 @@
         <define key="M1_PWM_TIMER_SELECTION" value="PWM_TIM1" />
         <define key="M1_PWM_TIMER_UP_IRQ" value="TIM1_UP_TIM16" />
         <define key="M1_REGULATION_EXECUTION_RATE" value="1" />
-        <define key="M1_RS" value="10" />
+        <define key="M1_RS" value="5" />
         <define key="M1_RSHUNT" value="0.003" />
         <define key="M1_SEGDIV" value="0" />
         <define key="M1_SHARED_SIGNAL_ENABLE" value="FALSE" />
@@ -199,7 +199,7 @@
         <define key="M1_TEMP_FDBK_CHANNEL" value="ADC_Channel_5" />
         <define key="M1_TEMPERATURE_READING" value="ENABLE" />
         <define key="M1_TF_KDDIV" value="8192" />
-        <define key="M1_TF_KIDIV" value="512" />
+        <define key="M1_TF_KIDIV" value="1024" />
         <define key="M1_TF_KPDIV" value="512" />
         <define key="M1_TNOISE_NS" value="4000" />
         <define key="M1_TRISE_NS" value="4000" />

@@ -54,7 +54,7 @@ static const MotorConfig_reg_t M1_MotorConfig_reg =
 {
   .polePairs  = 7,
   .ratedFlux  = 0.8,
-  .rs         = 10,
+  .rs         = 5,
   .ls         = 0.0005*1.000,
   .ld         = 0.0005,
   .maxCurrent = 1,

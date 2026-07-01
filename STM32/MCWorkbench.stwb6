@@ -6,18 +6,6 @@
   "workBenchVersionFileCreation": "6.4.2",
   "hardwares": {
     "type": "INVERTER",
-    "inverter": {
-      "hardwareFamily": "INVERTER",
-      "id": "B-G431B-ESC1",
-      "label": "B-G431B-ESC1",
-      "description": "Discovery kit with STM32G431CB MCU",
-      "compatibility": [
-        "FOC",
-        "sixStep"
-      ],
-      "descVersion": 4,
-      "contentVersion": "1.0"
-    },
     "control": {
       "hardwareFamily": "CONTROL",
       "mcu": {
@@ -133,318 +121,6 @@
       "description": "Discovery kit with STM32G431CB MCU",
       "link": "https://www.st.com/en/evaluation-tools/b-g431b-esc1.html"
     },
-    "power": [
-      {
-        "motorDrives": [
-          {
-            "name": "M1",
-            "maxRatedVoltage": 28,
-            "minRatedVoltage": 8,
-            "maxRatedCurrent": 40,
-            "resistorOffset": 0.181,
-            "features": [
-              {
-                "type": "CurrentSensing",
-                "name": "CurrentSensing",
-                "hwVariants": [
-                  {
-                    "type": "ThreeShunt_RawCurrents_Differential_InternalGain",
-                    "signals": {
-                      "CURRENT_SHUNT_UP": [
-                        {
-                          "name": "PA1",
-                          "help": "",
-                          "cost": 0
-                        }
-                      ],
-                      "CURRENT_SHUNT_VP": [
-                        {
-                          "name": "PA7",
-                          "help": "",
-                          "cost": 0
-                        }
-                      ],
-                      "CURRENT_SHUNT_WP": [
-                        {
-                          "name": "PB0",
-                          "help": "",
-                          "cost": 0
-                        }
-                      ],
-                      "CURRENT_SHUNT_UN": [
-                        {
-                          "name": "PA3",
-                          "help": "",
-                          "cost": 0
-                        }
-                      ],
-                      "CURRENT_SHUNT_VN": [
-                        {
-                          "name": "PA5",
-                          "help": "",
-                          "cost": 0
-                        }
-                      ],
-                      "CURRENT_SHUNT_WN": [
-                        {
-                          "name": "PB2",
-                          "help": "",
-                          "cost": 0
-                        }
-                      ]
-                    },
-                    "amplifyingNetworkImax": 40,
-                    "amplifyingNetworkVm": 3.3,
-                    "amplifyingNetworkPrating": 1.4,
-                    "offsetNetworkAttenuation": 0.571,
-                    "opAmpGain": 16,
-                    "polarizationOffset": 2.057,
-                    "help": "How to enable this variant",
-                    "shuntResistor": 0.003
-                  }
-                ],
-                "tRise": 1000
-              },
-              {
-                "type": "PhaseVoltageGeneration",
-                "name": "PhaseVoltageGeneration",
-                "hwVariants": [
-                  {
-                    "type": "DrivingHighAndLowSides",
-                    "signals": {
-                      "PWM_CHU_H": [
-                        {
-                          "name": "PA8",
-                          "help": "",
-                          "cost": 0
-                        }
-                      ],
-                      "PWM_CHV_H": [
-                        {
-                          "name": "PA9",
-                          "help": "",
-                          "cost": 0
-                        }
-                      ],
-                      "PWM_CHW_H": [
-                        {
-                          "name": "PA10",
-                          "help": "",
-                          "cost": 0
-                        }
-                      ],
-                      "PWM_CHU_L": [
-                        {
-                          "name": "PC13",
-                          "help": "",
-                          "cost": 0
-                        }
-                      ],
-                      "PWM_CHV_L": [
-                        {
-                          "name": "PA12",
-                          "help": "",
-                          "cost": 0
-                        }
-                      ],
-                      "PWM_CHW_L": [
-                        {
-                          "name": "PB15",
-                          "help": "",
-                          "cost": 0
-                        }
-                      ]
-                    },
-                    "deadTime": 800,
-                    "highSideSwitchesDrivingPolarity": "Active high",
-                    "lowSideSwitchesDrivingPolarity": "Active high",
-                    "help": "How to enable this variant"
-                  }
-                ],
-                "driverName": "L6387E",
-                "driverPN": "L6387E",
-                "tNoise": 1000,
-                "minDeadTime": 700,
-                "maxSwitchingFreq": 100
-              },
-              {
-                "type": "SpeedAndPositionSensing",
-                "name": "SpeedAndPositionSensing",
-                "hwVariants": [
-                  {
-                    "type": "HallEffectSensor",
-                    "signals": {
-                      "HALLSENSOR_H1": [
-                        {
-                          "name": "PB6",
-                          "help": "",
-                          "cost": 0
-                        }
-                      ],
-                      "HALLSENSOR_H2": [
-                        {
-                          "name": "PB7",
-                          "help": "",
-                          "cost": 0
-                        }
-                      ],
-                      "HALLSENSOR_H3": [
-                        {
-                          "name": "PB8-BOOT0",
-                          "help": "",
-                          "cost": 0
-                        }
-                      ]
-                    },
-                    "help": "SW 9 and 16 to consider"
-                  },
-                  {
-                    "type": "QuadratureEncoderRelative",
-                    "signals": {
-                      "QENC_A": [
-                        {
-                          "name": "PB6",
-                          "help": "",
-                          "cost": 0
-                        }
-                      ],
-                      "QENC_B": [
-                        {
-                          "name": "PB7",
-                          "help": "",
-                          "cost": 0
-                        }
-                      ]
-                    },
-                    "help": "SW 9 and 16 to consider"
-                  },
-                  {
-                    "type": "QuadratureEncoderAbsolute",
-                    "signals": {
-                      "QENC_A": [
-                        {
-                          "name": "PB6",
-                          "help": "",
-                          "cost": 0
-                        }
-                      ],
-                      "QENC_B": [
-                        {
-                          "name": "PB7",
-                          "help": "",
-                          "cost": 0
-                        }
-                      ],
-                      "QENC_Z": [
-                        {
-                          "name": "PB8-BOOT0",
-                          "help": "",
-                          "cost": 0
-                        }
-                      ]
-                    },
-                    "help": "SW 9 and 16 to consider"
-                  },
-                  {
-                    "type": "BEMFSensingADC",
-                    "signals": {
-                      "BEMF_U": [
-                        {
-                          "name": "PA4",
-                          "help": "",
-                          "cost": 0
-                        }
-                      ],
-                      "BEMF_V": [
-                        {
-                          "name": "PC4",
-                          "help": "",
-                          "cost": 0
-                        }
-                      ],
-                      "BEMF_W": [
-                        {
-                          "name": "PB11",
-                          "help": "",
-                          "cost": 0
-                        }
-                      ],
-                      "BEMF_DIVIDER": [
-                        {
-                          "name": "PB5",
-                          "help": "",
-                          "cost": 0
-                        }
-                      ]
-                    },
-                    "dividingNetworkR1": 10000,
-                    "dividingNetworkR2": 2200,
-                    "help": "enabled by default"
-                  }
-                ]
-              },
-              {
-                "type": "VBusSensing",
-                "name": "VBusSensing",
-                "hwVariants": [
-                  {
-                    "type": "VBusSensing",
-                    "signals": {
-                      "VBUS": [
-                        {
-                          "name": "PA0",
-                          "help": "",
-                          "cost": 0
-                        }
-                      ]
-                    },
-                    "busVoltageDivider": 10.389,
-                    "busVoltageDividerR1": 169,
-                    "busVoltageDividerR2": 18,
-                    "help": ""
-                  }
-                ],
-                "busVoltageDivider": 10.389
-              },
-              {
-                "type": "TemperatureSensing",
-                "name": "TemperatureSensing",
-                "hwVariants": [
-                  {
-                    "type": "NTCThermistor",
-                    "signals": {
-                      "TEMPERATURE_NTC": [
-                        {
-                          "name": "PB14",
-                          "help": "",
-                          "cost": 0
-                        }
-                      ]
-                    },
-                    "v0": 1400,
-                    "t0": 25,
-                    "gain": 19,
-                    "maxSensorTemperature": 70,
-                    "help": "Jumper of SW3 in position 2-3."
-                  }
-                ]
-              }
-            ]
-          }
-        ],
-        "hardwareFamily": "POWER",
-        "id": "B-G431B-ESC1",
-        "compatibility": [
-          "FOC",
-          "sixStep"
-        ],
-        "descVersion": 4,
-        "description": "Discovery kit with STM32G431CB MCU",
-        "contentVersion": "1.0",
-        "label": "B-G431B-ESC1",
-        "link": "https://www.st.com/en/evaluation-tools/b-g431b-esc1.html"
-      }
-    ],
     "motor": [
       {
         "polePairs": 7,
@@ -1021,6 +697,330 @@
       "warnings": [],
       "info": [],
       "critical": []
+    },
+    "power": [
+      {
+        "motorDrives": [
+          {
+            "name": "M1",
+            "maxRatedVoltage": 28,
+            "minRatedVoltage": 8,
+            "maxRatedCurrent": 40,
+            "resistorOffset": 0.181,
+            "features": [
+              {
+                "type": "CurrentSensing",
+                "name": "CurrentSensing",
+                "hwVariants": [
+                  {
+                    "type": "ThreeShunt_RawCurrents_Differential_InternalGain",
+                    "signals": {
+                      "CURRENT_SHUNT_UP": [
+                        {
+                          "name": "PA1",
+                          "help": "",
+                          "cost": 0
+                        }
+                      ],
+                      "CURRENT_SHUNT_VP": [
+                        {
+                          "name": "PA7",
+                          "help": "",
+                          "cost": 0
+                        }
+                      ],
+                      "CURRENT_SHUNT_WP": [
+                        {
+                          "name": "PB0",
+                          "help": "",
+                          "cost": 0
+                        }
+                      ],
+                      "CURRENT_SHUNT_UN": [
+                        {
+                          "name": "PA3",
+                          "help": "",
+                          "cost": 0
+                        }
+                      ],
+                      "CURRENT_SHUNT_VN": [
+                        {
+                          "name": "PA5",
+                          "help": "",
+                          "cost": 0
+                        }
+                      ],
+                      "CURRENT_SHUNT_WN": [
+                        {
+                          "name": "PB2",
+                          "help": "",
+                          "cost": 0
+                        }
+                      ]
+                    },
+                    "amplifyingNetworkImax": 40,
+                    "amplifyingNetworkVm": 3.3,
+                    "amplifyingNetworkPrating": 1.4,
+                    "offsetNetworkAttenuation": 0.571,
+                    "opAmpGain": 16,
+                    "polarizationOffset": 2.057,
+                    "help": "How to enable this variant",
+                    "shuntResistor": 0.003
+                  }
+                ],
+                "tRise": 1000
+              },
+              {
+                "type": "PhaseVoltageGeneration",
+                "name": "PhaseVoltageGeneration",
+                "hwVariants": [
+                  {
+                    "type": "DrivingHighAndLowSides",
+                    "signals": {
+                      "PWM_CHU_H": [
+                        {
+                          "name": "PA8",
+                          "help": "",
+                          "cost": 0
+                        }
+                      ],
+                      "PWM_CHV_H": [
+                        {
+                          "name": "PA9",
+                          "help": "",
+                          "cost": 0
+                        }
+                      ],
+                      "PWM_CHW_H": [
+                        {
+                          "name": "PA10",
+                          "help": "",
+                          "cost": 0
+                        }
+                      ],
+                      "PWM_CHU_L": [
+                        {
+                          "name": "PC13",
+                          "help": "",
+                          "cost": 0
+                        }
+                      ],
+                      "PWM_CHV_L": [
+                        {
+                          "name": "PA12",
+                          "help": "",
+                          "cost": 0
+                        }
+                      ],
+                      "PWM_CHW_L": [
+                        {
+                          "name": "PB15",
+                          "help": "",
+                          "cost": 0
+                        }
+                      ]
+                    },
+                    "deadTime": 800,
+                    "highSideSwitchesDrivingPolarity": "Active high",
+                    "lowSideSwitchesDrivingPolarity": "Active high",
+                    "help": "How to enable this variant"
+                  }
+                ],
+                "driverName": "L6387E",
+                "driverPN": "L6387E",
+                "tNoise": 1000,
+                "minDeadTime": 700,
+                "maxSwitchingFreq": 100
+              },
+              {
+                "type": "SpeedAndPositionSensing",
+                "name": "SpeedAndPositionSensing",
+                "hwVariants": [
+                  {
+                    "type": "HallEffectSensor",
+                    "signals": {
+                      "HALLSENSOR_H1": [
+                        {
+                          "name": "PB6",
+                          "help": "",
+                          "cost": 0
+                        }
+                      ],
+                      "HALLSENSOR_H2": [
+                        {
+                          "name": "PB7",
+                          "help": "",
+                          "cost": 0
+                        }
+                      ],
+                      "HALLSENSOR_H3": [
+                        {
+                          "name": "PB8-BOOT0",
+                          "help": "",
+                          "cost": 0
+                        }
+                      ]
+                    },
+                    "help": "SW 9 and 16 to consider"
+                  },
+                  {
+                    "type": "QuadratureEncoderRelative",
+                    "signals": {
+                      "QENC_A": [
+                        {
+                          "name": "PB6",
+                          "help": "",
+                          "cost": 0
+                        }
+                      ],
+                      "QENC_B": [
+                        {
+                          "name": "PB7",
+                          "help": "",
+                          "cost": 0
+                        }
+                      ]
+                    },
+                    "help": "SW 9 and 16 to consider"
+                  },
+                  {
+                    "type": "QuadratureEncoderAbsolute",
+                    "signals": {
+                      "QENC_A": [
+                        {
+                          "name": "PB6",
+                          "help": "",
+                          "cost": 0
+                        }
+                      ],
+                      "QENC_B": [
+                        {
+                          "name": "PB7",
+                          "help": "",
+                          "cost": 0
+                        }
+                      ],
+                      "QENC_Z": [
+                        {
+                          "name": "PB8-BOOT0",
+                          "help": "",
+                          "cost": 0
+                        }
+                      ]
+                    },
+                    "help": "SW 9 and 16 to consider"
+                  },
+                  {
+                    "type": "BEMFSensingADC",
+                    "signals": {
+                      "BEMF_U": [
+                        {
+                          "name": "PA4",
+                          "help": "",
+                          "cost": 0
+                        }
+                      ],
+                      "BEMF_V": [
+                        {
+                          "name": "PC4",
+                          "help": "",
+                          "cost": 0
+                        }
+                      ],
+                      "BEMF_W": [
+                        {
+                          "name": "PB11",
+                          "help": "",
+                          "cost": 0
+                        }
+                      ],
+                      "BEMF_DIVIDER": [
+                        {
+                          "name": "PB5",
+                          "help": "",
+                          "cost": 0
+                        }
+                      ]
+                    },
+                    "dividingNetworkR1": 10000,
+                    "dividingNetworkR2": 2200,
+                    "help": "enabled by default"
+                  }
+                ]
+              },
+              {
+                "type": "VBusSensing",
+                "name": "VBusSensing",
+                "hwVariants": [
+                  {
+                    "type": "VBusSensing",
+                    "signals": {
+                      "VBUS": [
+                        {
+                          "name": "PA0",
+                          "help": "",
+                          "cost": 0
+                        }
+                      ]
+                    },
+                    "busVoltageDivider": 10.389,
+                    "busVoltageDividerR1": 169,
+                    "busVoltageDividerR2": 18,
+                    "help": ""
+                  }
+                ],
+                "busVoltageDivider": 10.389
+              },
+              {
+                "type": "TemperatureSensing",
+                "name": "TemperatureSensing",
+                "hwVariants": [
+                  {
+                    "type": "NTCThermistor",
+                    "signals": {
+                      "TEMPERATURE_NTC": [
+                        {
+                          "name": "PB14",
+                          "help": "",
+                          "cost": 0
+                        }
+                      ]
+                    },
+                    "v0": 1400,
+                    "t0": 25,
+                    "gain": 19,
+                    "maxSensorTemperature": 70,
+                    "help": "Jumper of SW3 in position 2-3."
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "hardwareFamily": "POWER",
+        "id": "B-G431B-ESC1",
+        "compatibility": [
+          "FOC",
+          "sixStep"
+        ],
+        "descVersion": 4,
+        "description": "Discovery kit with STM32G431CB MCU",
+        "contentVersion": "1.0",
+        "label": "B-G431B-ESC1",
+        "link": "https://www.st.com/en/evaluation-tools/b-g431b-esc1.html"
+      }
+    ],
+    "inverter": {
+      "descVersion": 4,
+      "contentVersion": "1.0",
+      "hardwareFamily": "INVERTER",
+      "id": "B-G431B-ESC1",
+      "label": "B-G431B-ESC1",
+      "description": "Discovery kit with STM32G431CB MCU",
+      "compatibility": [
+        "FOC",
+        "sixStep"
+      ]
     }
   },
   "checkList": {},
@@ -1124,7 +1124,7 @@
         "description": "",
         "polePairs": "Number.NaN",
         "mmsType": "",
-        "rs": "Number.NaN",
+        "rs": 5,
         "ls": 0.5,
         "mmsLd_lq_ratio": "Number.NaN",
         "maxCurrent": "Number.NaN",

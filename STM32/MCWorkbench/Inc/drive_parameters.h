@@ -64,10 +64,10 @@
 
 /* Torque/Flux control loop gains dividers*/
 #define TF_KPDIV                            512
-#define TF_KIDIV                            512
+#define TF_KIDIV                            1024
 #define TF_KDDIV                            8192
 #define TF_KPDIV_LOG                        LOG2((512))
-#define TF_KIDIV_LOG                        LOG2((512))
+#define TF_KIDIV_LOG                        LOG2((1024))
 #define TF_KDDIV_LOG                        LOG2((8192))
 #define TFDIFFERENTIAL_TERM_ENABLING        DISABLE
 
