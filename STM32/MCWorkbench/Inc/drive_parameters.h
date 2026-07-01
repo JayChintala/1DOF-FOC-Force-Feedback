@@ -55,24 +55,24 @@
 #define ISR_FREQUENCY_HZ                    (PWM_FREQUENCY/REGULATION_EXECUTION_RATE) /*!< @brief FOC execution rate in Hz */
 
 /* Gains values for torque and flux control loops */
-#define PID_TORQUE_KP_DEFAULT               2569
+#define PID_TORQUE_KP_DEFAULT               3853
 #define PID_TORQUE_KI_DEFAULT               3211
 #define PID_TORQUE_KD_DEFAULT               100
-#define PID_FLUX_KP_DEFAULT                 2569
+#define PID_FLUX_KP_DEFAULT                 3853
 #define PID_FLUX_KI_DEFAULT                 3211
 #define PID_FLUX_KD_DEFAULT                 100
 
 /* Torque/Flux control loop gains dividers*/
-#define TF_KPDIV                            512
+#define TF_KPDIV                            256
 #define TF_KIDIV                            1024
 #define TF_KDDIV                            8192
-#define TF_KPDIV_LOG                        LOG2((512))
+#define TF_KPDIV_LOG                        LOG2((256))
 #define TF_KIDIV_LOG                        LOG2((1024))
 #define TF_KDDIV_LOG                        LOG2((8192))
 #define TFDIFFERENTIAL_TERM_ENABLING        DISABLE
 
 #define PID_SPEED_KP_DEFAULT                3749/(SPEED_UNIT/10) /* Workbench compute the gain for 01Hz unit*/
-#define PID_SPEED_KI_DEFAULT                13/(SPEED_UNIT/10) /* Workbench compute the gain for 01Hz unit*/
+#define PID_SPEED_KI_DEFAULT                147/(SPEED_UNIT/10) /* Workbench compute the gain for 01Hz unit*/
 #define PID_SPEED_KD_DEFAULT                0/(SPEED_UNIT/10) /* Workbench compute the gain for 01Hz unit*/
 
 /* Speed control loop */

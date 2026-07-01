@@ -27,7 +27,7 @@
         <define key="ENC_B_GPIO_PIN" value="GPIO_Pin_7" />
         <define key="ENC_B_GPIO_PORT" value="GPIOB" />
         <define key="ENC_ICx_FILTER" value="128" />
-        <define key="ENC_INVERT_SPEED" value="ENABLE" />
+        <define key="ENC_INVERT_SPEED" value="DISABLE" />
         <define key="ENC_TIMER_SELECTION" value="ENC_TIM4" />
         <define key="ENC_USE_CH3" value="FALSE" />
         <define key="ENCODER" value="TRUE" />
@@ -57,8 +57,8 @@
         <define key="M1_BOARD_MAX_CURRENT" value="1" />
         <define key="M1_BUS_VOLTAGE_READING" value="ENABLE" />
         <define key="M1_COMMUTATION_STEP_TIME_BUF_SIZE" value="12" />
-        <define key="M1_CONSTANT1_D" value="2892269" />
-        <define key="M1_CONSTANT1_Q" value="2892269" />
+        <define key="M1_CONSTANT1_D" value="8676807" />
+        <define key="M1_CONSTANT1_Q" value="8676807" />
         <define key="M1_CONSTANT2_QD" value="5497" />
         <define key="M1_CS_ADC_NUM" value="2" />
         <define key="M1_CS_ADC_PHASE_SHARED" value="W" />
@@ -124,7 +124,7 @@
         <define key="M1_LDLQ_RATIO" value="1.000" />
         <define key="M1_LOW_SIDE_IDLE_STATE" value="TURN_OFF" />
         <define key="M1_LOW_SIDE_SIGNALS_ENABLING" value="LS_PWM_TIMER" />
-        <define key="M1_LS" value="0.0005" />
+        <define key="M1_LS" value="0.0015" />
         <define key="M1_MAX_APPLICATION_SPEED" value="500" />
         <define key="M1_MAX_MODULATION_INDEX" value="89" />
         <define key="M1_MIN_APPLICATION_SPEED" value="0" />
@@ -161,13 +161,13 @@
         <define key="M1_OVP_THRESHOLD_HIGH" value="14.4" />
         <define key="M1_PID_FLUX_KD_DEFAULT" value="100" />
         <define key="M1_PID_FLUX_KI_DEFAULT" value="3211" />
-        <define key="M1_PID_FLUX_KP_DEFAULT" value="2569" />
+        <define key="M1_PID_FLUX_KP_DEFAULT" value="3853" />
         <define key="M1_PID_SPEED_KD_DEFAULT" value="0" />
-        <define key="M1_PID_SPEED_KI_DEFAULT" value="13" />
+        <define key="M1_PID_SPEED_KI_DEFAULT" value="147" />
         <define key="M1_PID_SPEED_KP_DEFAULT" value="3749" />
         <define key="M1_PID_TORQUE_KD_DEFAULT" value="100" />
         <define key="M1_PID_TORQUE_KI_DEFAULT" value="3211" />
-        <define key="M1_PID_TORQUE_KP_DEFAULT" value="2569" />
+        <define key="M1_PID_TORQUE_KP_DEFAULT" value="3853" />
         <define key="M1_POLE_PAIR_NUM" value="7" />
         <define key="M1_POSITION_CTRL_ENABLING" value="DISABLE" />
         <define key="M1_POTENTIOMETER_ENABLE" value="FALSE" />
@@ -200,7 +200,7 @@
         <define key="M1_TEMPERATURE_READING" value="ENABLE" />
         <define key="M1_TF_KDDIV" value="8192" />
         <define key="M1_TF_KIDIV" value="1024" />
-        <define key="M1_TF_KPDIV" value="512" />
+        <define key="M1_TF_KPDIV" value="256" />
         <define key="M1_TNOISE_NS" value="4000" />
         <define key="M1_TRISE_NS" value="4000" />
         <define key="M1_UD_VOLTAGE_THRESHOLD_V" value="8.0" />
@@ -417,7 +417,7 @@
         <define key="WB_UI_GAINLIST" value="[{'factor':2,'gain':1.142,'pol':0.257125,'maxVRef':3.3},{'factor':4,'gain':2.284,'pol':0.51425,'maxVRef':3.3},{'factor':8,'gain':4.568,'pol':1.0285,'maxVRef':3.3},{'factor':16,'gain':9.136,'pol':2.057,'maxVRef':3.3},{'factor':32,'gain':18.272,'pol':4.114,'maxVRef':3.3},{'factor':64,'gain':36.544,'pol':8.228,'maxVRef':3.3}]" />
         <define key="WB_UI_GON" value="0.571" />
         <define key="WB_UI_GOP" value="8" />
-        <define key="WB_UI_INERTIA" value="0.55" />
+        <define key="WB_UI_INERTIA" value="0.05" />
         <define key="WB_UI_MAGNETIC_STRUCTURE" value="SM-PMSM" />
         <define key="WB_UI_MAX_CURRENT" value="1" />
         <define key="WB_UI_MAX_NOMINAL_DC_VOLTAGE" value="12" />
