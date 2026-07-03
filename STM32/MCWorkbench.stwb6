@@ -1034,7 +1034,7 @@
             "_tag": "encoder",
             "speedFIFODepth": "Number.NaN",
             "inputFilterDuration": "Number.NaN",
-            "reverseCountDirection": false,
+            "reverseCountDirection": true,
             "encoderModeAbsolute": false,
             "startUpParam": {
               "duration": 2000,
@@ -1123,16 +1123,16 @@
         "label": "",
         "description": "",
         "polePairs": "Number.NaN",
-        "mmsType": "",
-        "rs": 5,
-        "ls": 1.5,
+        "mmsType": "SM-PMSM",
+        "rs": 5.29,
+        "ls": 1.058,
         "mmsLd_lq_ratio": "Number.NaN",
-        "maxCurrent": 1,
-        "maxDCVoltage": "Number.NaN",
-        "BEmfConstant": "Number.NaN",
-        "inertia": 0.05,
-        "friction": "Number.NaN",
-        "maxRatedSpeed": "Number.NaN",
+        "maxCurrent": 0.8,
+        "maxDCVoltage": 12.6,
+        "BEmfConstant": 4.964,
+        "inertia": 0.291,
+        "friction": 0.937,
+        "maxRatedSpeed": 1572,
         "hasHallSensor": false,
         "hallSensor": {
           "sensorsDisplacement": "Number.NaN",
@@ -1182,20 +1182,20 @@
       },
       "driveManagement_0": {
         "currentReg": {
-          "controlMode": "",
+          "controlMode": "speed",
           "autoPI": true,
           "KpKi": {
             "P": "Number.NaN",
             "I": "Number.NaN"
           },
-          "cutOffFrequency": 500,
+          "cutOffFrequency": 6000,
           "useMTPA": false,
           "feedForward": false,
           "MTPATarget": "Number.NaN"
         },
         "speedReg": {
-          "executionRate": "Number.NaN",
-          "targetSpeed": 100,
+          "executionRate": 1,
+          "targetSpeed": 524,
           "commutationTime": "Number.NaN",
           "KpKi": {
             "P": {
