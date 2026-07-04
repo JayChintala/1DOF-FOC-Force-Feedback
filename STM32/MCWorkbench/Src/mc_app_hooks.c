@@ -1,4 +1,3 @@
-
 /**
  ******************************************************************************
  * @file    mc_app_hooks.c
@@ -23,9 +22,8 @@
 /* Includes ------------------------------------------------------------------*/
 #include "mc_app_hooks.h"
 
-#include "mc_type.h"
-
 #include "can_driver.h"
+#include "mc_type.h"
 
 /** @addtogroup MCSDK
  * @{

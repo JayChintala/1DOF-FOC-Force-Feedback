@@ -25,7 +25,6 @@
 
 #include "mc_type.h"
 #include "mc_interface.h"
-#include "can_driver.h"
 
 #ifdef __cplusplus
  extern "C" {
