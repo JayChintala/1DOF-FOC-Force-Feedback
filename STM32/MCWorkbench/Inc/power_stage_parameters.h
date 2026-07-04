@@ -37,7 +37,7 @@
                                                       much the Vbus is attenuated
                                                       before being converted into
                                                       digital value */
-#define NOMINAL_BUS_VOLTAGE_V                12U
+#define NOMINAL_BUS_VOLTAGE_V                13U
 /******** Current reading parameters section ******/
 /*** Topology ***/
 #define THREE_SHUNT

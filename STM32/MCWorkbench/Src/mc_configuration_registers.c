@@ -42,10 +42,10 @@ const GlobalConfig_reg_t globalConfig_reg =
 
 static const ApplicationConfig_reg_t M1_ApplicationConfig_reg =
 {
-  .maxMechanicalSpeed = 500,
+  .maxMechanicalSpeed = 1572,
   .maxReadableCurrent = M1_MAX_READABLE_CURRENT,
-  .nominalCurrent     = 1,
-  .nominalVoltage     = 12,
+  .nominalCurrent     = 0.8,
+  .nominalVoltage     = 13,
   .driveType          = DRIVE_TYPE_M1,
 };
 
@@ -53,11 +53,11 @@ static const ApplicationConfig_reg_t M1_ApplicationConfig_reg =
 static const MotorConfig_reg_t M1_MotorConfig_reg =
 {
   .polePairs  = 7,
-  .ratedFlux  = 0.8,
-  .rs         = 5,
-  .ls         = 0.0015*1.000,
-  .ld         = 0.0015,
-  .maxCurrent = 1,
+  .ratedFlux  = 5.0,
+  .rs         = 5.29,
+  .ls         = 0.001058*1.000,
+  .ld         = 0.001058,
+  .maxCurrent = 0.8,
   .name = "GBM2408"
 };
 
