@@ -30,19 +30,18 @@ ID_IQ_READBACK = 0x010
 ID_ELEC_ANGLE = 0x013
 ID_ENC_COUNT = 0x014
 
-# ---- UNCONFIRMED VALUES -----------------------------------------------
-# ENC_PULSE_NBR: wrap point of the raw TIM4 encoder counter.
-# Confirm via mc_config.h (M1_PULSE_NBR) OR empirically:
-#   rotate the shaft exactly 1 revolution by hand, read the ENC_COUNT
-#   delta via candump, that delta is your pulse count per revolution.
-# Placeholder below is almost certainly wrong -- update before trusting
-# unwrapped position for anything quantitative.
-ENC_PULSE_NBR = 65536
+# ENC_PULSE_NBR: wrap modulus of the raw TIM4 encoder counter.
+# Confirmed from MCWorkbench\Src\mc_config_common.c:
+#   .PulseNumber = M1_ENCODER_PPR * 4
+# with M1_ENCODER_PPR = 1000 (pmsm_motor_parameters.h) -> 4000.
+# NOTE: this is intentionally different from the M1_PULSE_NBR macro in
+# parameters_conversion.h, which equals (4*PPR)-1 = 3999 -- that's the
+# TIM4 ARR (auto-reload) value used to load the timer, so the counter
+# counts 0..3999 (4000 distinct states) before wrapping. .PulseNumber
+# (4000) is the value the encoder driver itself uses in its position
+# math, so 4000 is the correct modulus here.
+ENC_PULSE_NBR = 4000
 
-# DPP_TO_DEG: conversion from the int16 ELEC_ANGLE "DPP" value to degrees.
-# Assumed here to be the common ST MC-SDK convention: signed 16-bit value
-# spanning +-180 electrical degrees (i.e. 32768 counts = 180 deg).
-# Confirm against your firmware's actual angle representation.
 DPP_TO_DEG = 180.0 / 32768.0
 # ------------------------------------------------------------------------
 
@@ -124,14 +123,17 @@ class MotorCANInterface:
 
     # ---- commands (Pi -> MCU) ----
     def send_start(self):
-        self.bus.send(can.Message(arbitration_id=ID_START, data=b"", is_extended_id=False))
+        self.bus.send(can.Message(arbitration_id=ID_START,
+                      data=b"", is_extended_id=False))
 
     def send_stop(self):
-        self.bus.send(can.Message(arbitration_id=ID_STOP, data=b"", is_extended_id=False))
+        self.bus.send(can.Message(arbitration_id=ID_STOP,
+                      data=b"", is_extended_id=False))
 
     def send_set_iq(self, amps: float):
         payload = struct.pack("<f", amps)
-        self.bus.send(can.Message(arbitration_id=ID_SET_IQ, data=payload, is_extended_id=False))
+        self.bus.send(can.Message(arbitration_id=ID_SET_IQ,
+                      data=payload, is_extended_id=False))
 
     # ---- telemetry (MCU -> Pi) ----
     def _rx_loop(self):
