@@ -1182,7 +1182,7 @@
       },
       "driveManagement_0": {
         "currentReg": {
-          "controlMode": "speed",
+          "controlMode": "torque",
           "autoPI": true,
           "KpKi": {
             "P": "Number.NaN",
@@ -1210,7 +1210,7 @@
           "autoPI": true
         },
         "torqueReg": {
-          "target": "Number.NaN",
+          "target": 0.05,
           "KpKi": {
             "P": {
               "num": "Number.NaN",

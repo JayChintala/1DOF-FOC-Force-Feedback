@@ -84,10 +84,10 @@
         <define key="M1_DAC_CURRENT_THRESHOLD" value="8167" />
         <define key="M1_DBG_OPEN_LOOP_ENABLE" value="FALSE" />
         <define key="M1_DC_CURRENT_RS_MEAS" value="0.8" />
-        <define key="M1_DEFAULT_CONTROL_MODE" value="STC_SPEED_MODE" />
+        <define key="M1_DEFAULT_CONTROL_MODE" value="STC_TORQUE_MODE" />
         <define key="M1_DEFAULT_FLUX_COMPONENT" value="0" />
         <define key="M1_DEFAULT_TARGET_SPEED_RPM" value="524" />
-        <define key="M1_DEFAULT_TORQUE_COMPONENT" value="0" />
+        <define key="M1_DEFAULT_TORQUE_COMPONENT" value="0.05" />
         <define key="M1_DISCONTINUOUS_PWM" value="FALSE" />
         <define key="M1_DP_TOPOLOGY" value="NONE" />
         <define key="M1_DRIVE_TYPE" value="FOC" />

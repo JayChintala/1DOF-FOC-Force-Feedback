@@ -60,8 +60,8 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
-#define CAN_TERM_Pin GPIO_PIN_14
-#define CAN_TERM_GPIO_Port GPIOC
+#define M1_PWM_UL_Pin GPIO_PIN_13
+#define M1_PWM_UL_GPIO_Port GPIOC
 #define M1_BUS_VOLTAGE_Pin GPIO_PIN_0
 #define M1_BUS_VOLTAGE_GPIO_Port GPIOA
 #define M1_CURR_SHUNT_U_Pin GPIO_PIN_1
@@ -82,8 +82,6 @@ void Error_Handler(void);
 #define M1_OPAMP3_OUT_GPIO_Port GPIOB
 #define M1_OPAMP3_INT_GAIN_Pin GPIO_PIN_2
 #define M1_OPAMP3_INT_GAIN_GPIO_Port GPIOB
-#define CAN_TERM_ALT_Pin GPIO_PIN_13
-#define CAN_TERM_ALT_GPIO_Port GPIOB
 #define M1_TEMPERATURE_Pin GPIO_PIN_14
 #define M1_TEMPERATURE_GPIO_Port GPIOB
 #define M1_PWM_WL_Pin GPIO_PIN_15
@@ -99,8 +97,6 @@ void Error_Handler(void);
 #define Start_Stop_Pin GPIO_PIN_10
 #define Start_Stop_GPIO_Port GPIOC
 #define Start_Stop_EXTI_IRQn EXTI15_10_IRQn
-#define CAN_SHDN_Pin GPIO_PIN_11
-#define CAN_SHDN_GPIO_Port GPIOC
 #define UART_TX_Pin GPIO_PIN_3
 #define UART_TX_GPIO_Port GPIOB
 #define UART_RX_Pin GPIO_PIN_4
