@@ -21,10 +21,10 @@
   */
 
 /* Includes ------------------------------------------------------------------*/
-#include "mc_app_hooks.h"
-
 #include "mc_type.h"
 #include "mc_app_hooks.h"
+#include "can_driver.h"
+
 
 /** @addtogroup MCSDK
   * @{
