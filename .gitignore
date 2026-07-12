@@ -53,7 +53,10 @@ STM32/MCWorkbench/Inc/
 STM32/MCWorkbench/Src/
 STM32/MCWorkbench/MCSDK*/
 STM32/MCWorkbench/EWARM/
-STM32/MCWorkbench/STM32CubeIDE/
+STM32/MCWorkbench/STM32CubeIDE/*
+!STM32/MCWorkbench/STM32CubeIDE/.cproject
+!STM32/MCWorkbench/STM32CubeIDE/.project
+!STM32/MCWorkbench/STM32CubeIDE/*.launch
 STM32/MCWorkbench/.mxproject
 
 # Logs and temp files
