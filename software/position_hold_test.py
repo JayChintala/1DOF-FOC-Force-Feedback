@@ -54,11 +54,11 @@ from plot_run import plot_log
 # ---- Tuning ----
 # Reset to the best confirmed-stable reference point from prior sessions.
 # (Do not reintroduce untested gains at the same time as new safety code.)
-KP = 0.0001
-KD = 0.000005
-IQ_MAX_A = 0.3
+KP = 0.000265
+KD = 0.00001
+IQ_MAX_A = 0.8
 
-CONTROL_RATE_HZ = 100.0
+CONTROL_RATE_HZ = 200.0
 RUN_DURATION_S = 15.0
 
 # ---- Velocity filter ----
@@ -133,8 +133,7 @@ def main():
             return
         target_pos = t0["enc_count_unwrapped"]
         target_deg = target_pos / ENC_PULSE_NBR * 360.0
-        print(
-            f"Holding position: {target_pos:.0f} counts ({target_deg:.1f} mech deg)")
+        print(f"Holding position: {target_pos:.0f} counts ({target_deg:.1f} mech deg)")
         print(f"KP={KP} A/count  KD={KD} A/(count/s)  IQ_MAX={IQ_MAX_A}A")
         print(f"Watchdog: |vel|>{WATCHDOG_VEL_LIMIT_CNT_S:g} cnt/s or "
               f"|error|>{WATCHDOG_ERROR_LIMIT_CNT:g} cnt -> abort")
@@ -170,8 +169,7 @@ def main():
                 vel_raw = 0.0
             else:
                 vel_raw = (pos - prev_pos) / elapsed
-            vel_filt = VEL_FILTER_ALPHA * vel_raw + \
-                (1 - VEL_FILTER_ALPHA) * vel_filt
+            vel_filt = VEL_FILTER_ALPHA * vel_raw + (1 - VEL_FILTER_ALPHA) * vel_filt
 
             error = target_pos - pos
 
@@ -223,8 +221,7 @@ def main():
         print("CAN interface closed.")
         if no_data:
             os.remove(log_path)  # aborted before any rows were logged
-            print(
-                "No data logged (aborted before run started) -- log discarded, no plot.")
+            print("No data logged (aborted before run started) -- log discarded, no plot.")
         else:
             print(f"Log saved: {log_path}")
             png_path = plot_log(log_path)

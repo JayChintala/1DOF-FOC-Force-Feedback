@@ -156,17 +156,14 @@ class MotorCANInterface:
 
     # ---- commands (Pi -> MCU) ----
     def send_start(self):
-        self.bus.send(can.Message(arbitration_id=self._id_start,
-                      data=b"", is_extended_id=False))
+        self.bus.send(can.Message(arbitration_id=self._id_start, data=b"", is_extended_id=False))
 
     def send_stop(self):
-        self.bus.send(can.Message(arbitration_id=self._id_stop,
-                      data=b"", is_extended_id=False))
+        self.bus.send(can.Message(arbitration_id=self._id_stop, data=b"", is_extended_id=False))
 
     def send_set_iq(self, amps: float):
         payload = struct.pack("<f", amps)
-        self.bus.send(can.Message(arbitration_id=self._id_set_iq,
-                      data=payload, is_extended_id=False))
+        self.bus.send(can.Message(arbitration_id=self._id_set_iq, data=payload, is_extended_id=False))
 
     # ---- telemetry (MCU -> Pi) ----
     def _rx_loop(self):
