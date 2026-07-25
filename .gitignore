@@ -78,5 +78,6 @@ build/
 *.bin
 
 
-# Powerpoint used to track different PID responses for tuning
+# Internal documentation
 Presentation1.pptx
+datasheets
