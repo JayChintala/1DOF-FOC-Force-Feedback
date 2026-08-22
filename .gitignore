@@ -49,8 +49,10 @@ fp-info-cache
 # STM32CubeMX / ST Motor Control Workbench - Keep ONLY configs
 # IGNORE generated files (can be regenerated)
 STM32/MCWorkbench/Drivers/
-STM32/MCWorkbench/Inc/
-STM32/MCWorkbench/Src/
+STM32/MCWorkbench/Inc/*
+STM32/MCWorkbench/Src/*
+!STM32/MCWorkbench/Inc/can_driver.h
+!STM32/MCWorkbench/Src/can_driver.c
 STM32/MCWorkbench/MCSDK*/
 STM32/MCWorkbench/EWARM/
 STM32/MCWorkbench/STM32CubeIDE/*
