@@ -46,7 +46,10 @@
 
 /*  ICSs gains in case of isolated current sensors,
         amplification gain for shunts based sensing */
-#define AMPLIFICATION_GAIN                   4.57
+/* 16x PGA gain (was 8x/4.57): keep in sync with the OPAMP PgaGain enum in
+   main.c, DAC_OCP_Threshold in mc_parameters.c, and PID_TORQUE/FLUX_K*_DEFAULT
+   in drive_parameters.h -- none of these are tied together by the compiler. */
+#define AMPLIFICATION_GAIN                   9.14
 
 /*** Noise parameters ***/
 #define TNOISE_NS                            4000

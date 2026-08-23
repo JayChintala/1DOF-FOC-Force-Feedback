@@ -55,11 +55,17 @@
 #define ISR_FREQUENCY_HZ                    (PWM_FREQUENCY/REGULATION_EXECUTION_RATE) /*!< @brief FOC execution rate in Hz */
 
 /* Gains values for torque and flux control loops */
-#define PID_TORQUE_KP_DEFAULT               3882
-#define PID_TORQUE_KI_DEFAULT               2426
+/* Rescaled /2 for the 8x->16x AMPLIFICATION_GAIN change (power_stage_parameters.h):
+   the ADC-to-feedback path has no gain compensation, so the same real current
+   error now produces a 2x larger digital error into these fixed Kp/Ki gains.
+   Left unscaled, the loop would become ~2x more aggressive in real terms.
+   Original 8x-gain values were 3882/2426; KD is unused by the PI regulator
+   (no derivative term applied) so it's left as-is. */
+#define PID_TORQUE_KP_DEFAULT               1941
+#define PID_TORQUE_KI_DEFAULT               1213
 #define PID_TORQUE_KD_DEFAULT               100
-#define PID_FLUX_KP_DEFAULT                 3882
-#define PID_FLUX_KI_DEFAULT                 2426
+#define PID_FLUX_KP_DEFAULT                 1941
+#define PID_FLUX_KI_DEFAULT                 1213
 #define PID_FLUX_KD_DEFAULT                 100
 
 /* Torque/Flux control loop gains dividers*/

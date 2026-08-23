@@ -162,7 +162,10 @@ const R3_2_Params_t R3_2_ParamsM1 =
   .DAC_Channel_OVP       = (uint32_t)0,
 
 /* DAC settings --------------------------------------------------------------*/
-  .DAC_OCP_Threshold     = 8167,
+  /* Scaled x2 for the 8x->16x AMPLIFICATION_GAIN change (power_stage_parameters.h)
+     to preserve the original ~30A physical overcurrent trip point -- this is a
+     baked-in literal, not a formula, so it does not update automatically. */
+  .DAC_OCP_Threshold     = 16334,
   .DAC_OVP_Threshold     = 23830,
 
 };
