@@ -181,6 +181,11 @@ uint8_t RI_SetRegisterMotor1(uint16_t regID, uint8_t typeID, uint8_t *data, uint
             retVal = MCP_ERROR_RO_REG;
             break;
           }
+        case MC_REG_SECTOR:
+          {
+            retVal = MCP_ERROR_RO_REG;
+            break;
+          }
         case MC_REG_CONTROL_MODE:
         {
           uint8_t regdata8 = *data;
@@ -679,6 +684,12 @@ uint8_t RI_GetRegisterGlobal(uint16_t regID,uint8_t typeID,uint8_t * data,uint16
             case MC_REG_STATUS:
             {
               *data = (uint8_t)MCI_GetSTMState(pMCIN);
+              break;
+            }
+
+            case MC_REG_SECTOR:
+            {
+              *data = pMCIN->pPWM->Sector;
               break;
             }
 

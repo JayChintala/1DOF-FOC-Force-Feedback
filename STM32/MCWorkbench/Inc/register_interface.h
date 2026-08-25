@@ -89,6 +89,7 @@
 #define  MC_REG_OPENLOOP_SENSING         ((35U << ELT_IDENTIFIER_POS) | TYPE_DATA_8BIT)
 #define  MC_REG_IPD_ENABLE               ((36U << ELT_IDENTIFIER_POS) | TYPE_DATA_8BIT)
 #define  MC_REG_IPD_DEBUG                ((37U << ELT_IDENTIFIER_POS) | TYPE_DATA_8BIT)
+#define  MC_REG_SECTOR                   ((38U << ELT_IDENTIFIER_POS) | TYPE_DATA_8BIT)
 
 /* TYPE_DATA_16BIT registers definition */
 #define  MC_REG_SPEED_KP                 ((2U << ELT_IDENTIFIER_POS) | TYPE_DATA_16BIT)
