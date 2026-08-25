@@ -83,3 +83,8 @@ build/
 # Internal documentation
 Presentation1.pptx
 datasheets
+
+# Generated test logs/plots and Python bytecode
+logs/
+software/logs/
+software/__pycache__/
