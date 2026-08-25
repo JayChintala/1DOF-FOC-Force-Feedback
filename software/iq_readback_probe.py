@@ -1,6 +1,8 @@
 """
 IQ_READBACK sensing probe -- diagnostic for the force-mirror premise.
 
+Targets Motor 2 (NODE_BASE_M1 = 0x020) rather than Motor 1.
+
 force_mirror_test.py assumes Motor 1's IQ_READBACK reflects the force a
 hand applies to its shaft while Motor 1 is commanded to zero torque. In a
 current-controlled FOC that is suspect: with Iq commanded to 0, the current
@@ -34,7 +36,7 @@ import time
 
 from can_interface import MotorCANInterface, ENC_PULSE_NBR
 
-NODE_BASE_M1 = 0x000
+NODE_BASE_M1 = 0x020
 PRINT_HZ = 50.0
 PRINT_PERIOD_S = 1.0 / PRINT_HZ
 RUN_DURATION_S = 20.0

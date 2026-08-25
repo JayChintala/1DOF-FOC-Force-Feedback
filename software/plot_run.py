@@ -3,8 +3,9 @@ Shared plotting utilities for the motor test CSV logs.
 
 Each test writes its own CSV schema and calls the matching plotter here, so
 all plotting code lives in one place rather than being duplicated per test:
-  - plot_log            <- position_hold_test.py (single-motor PD hold)
-  - plot_bilateral_log  <- bilateral_test.py     (two-motor coupling)
+  - plot_log                  <- position_hold_test.py   (single-motor PD hold)
+  - plot_bilateral_log        <- bilateral_test.py        (two-motor coupling)
+  - plot_torque_tracking_log  <- torque_tracking_test.py  (open-loop Iq steps)
 
 Can be used two ways:
   1. Imported and called directly from a test script:
@@ -13,6 +14,9 @@ Can be used two ways:
 
          from plot_run import plot_bilateral_log
          plot_bilateral_log("logs/bilateral_....csv")
+
+         from plot_run import plot_torque_tracking_log
+         plot_torque_tracking_log("logs/torque_tracking....csv")
 
   2. Run standalone from the command line -- the format is auto-detected
      from the CSV header, so either log type works:
@@ -204,16 +208,107 @@ def plot_bilateral_log(csv_path, out_path=None):
     return out_path
 
 
+def load_torque_tracking_log(path):
+    """
+    Load a torque_tracking_test.py CSV. iq_actual/iq_err/iq_readback_age_s
+    may be blank in a row (telemetry not yet seen), so those are kept
+    nullable; every other column is numeric.
+    """
+    rows = {k: [] for k in ("t", "step_idx", "iq_cmd", "iq_actual", "iq_err",
+                             "vel", "age")}
+    with open(path, newline="") as f:
+        r = csv.DictReader(f)
+        for row in r:
+            rows["t"].append(float(row["t_s"]))
+            rows["step_idx"].append(int(row["step_idx"]))
+            rows["iq_cmd"].append(float(row["iq_cmd"]))
+            rows["iq_actual"].append(float(row["iq_actual"]) if row["iq_actual"] else None)
+            rows["iq_err"].append(float(row["iq_err"]) if row["iq_err"] else None)
+            rows["vel"].append(float(row["vel"]))
+            rows["age"].append(float(row["iq_readback_age_s"]) if row["iq_readback_age_s"] else None)
+    return rows
+
+
+def plot_torque_tracking_log(csv_path, out_path=None):
+    """
+    Read a torque_tracking_test.py CSV log and save a 4-panel diagnostic
+    PNG. Returns the output path, or None if there was no data to plot.
+
+    Panels (shared time axis):
+      1. Commanded Iq (the staircase) vs measured IQ_READBACK -- how
+         closely actual current tracks each commanded step.
+      2. Tracking error (actual - cmd) -- should collapse toward zero
+         after each step's transient.
+      3. Shaft velocity -- sanity check that a step didn't run away
+         (this is what the watchdog in the test script guards against).
+      4. IQ_READBACK age at each sample -- how stale the telemetry the
+         controller is acting on ever gets; spikes here mean the CAN
+         link isn't keeping up, not that the current loop is wrong.
+
+    csv_path: path to the CSV log.
+    out_path: optional explicit output path; defaults to csv_path with the
+              extension swapped to .png.
+    """
+    data = load_torque_tracking_log(csv_path)
+
+    if not data["t"]:
+        print(f"No data rows found in {csv_path} -- nothing to plot.")
+        return None
+
+    fig, axes = plt.subplots(4, 1, figsize=(11, 12), sharex=True)
+
+    # Panel 1: commanded staircase vs measured current.
+    axes[0].plot(data["t"], data["iq_cmd"], color="tab:green",
+                 label="Iq_cmd", linewidth=1.2)
+    t_act = [t for t, v in zip(data["t"], data["iq_actual"]) if v is not None]
+    v_act = [v for v in data["iq_actual"] if v is not None]
+    if t_act:
+        axes[0].plot(t_act, v_act, color="tab:orange", label="Iq_actual",
+                     alpha=0.7, linewidth=0.8)
+    axes[0].set_ylabel("Current (A)")
+    axes[0].legend(loc="upper right", fontsize=8)
+    axes[0].set_title(os.path.basename(csv_path))
+
+    # Panel 2: tracking error.
+    t_err = [t for t, v in zip(data["t"], data["iq_err"]) if v is not None]
+    v_err = [v for v in data["iq_err"] if v is not None]
+    axes[1].plot(t_err, v_err, color="tab:purple")
+    axes[1].axhline(0, color="gray", linestyle="--", linewidth=1)
+    axes[1].set_ylabel("Tracking error\n(A)")
+
+    # Panel 3: velocity -- confirms no step ran away.
+    axes[2].plot(data["t"], data["vel"], color="tab:red")
+    axes[2].axhline(0, color="gray", linestyle="--", linewidth=1)
+    axes[2].set_ylabel("Velocity\n(counts/s)")
+
+    # Panel 4: telemetry staleness at time of use.
+    t_age = [t for t, v in zip(data["t"], data["age"]) if v is not None]
+    v_age = [v for v in data["age"] if v is not None]
+    axes[3].plot(t_age, v_age, color="tab:brown")
+    axes[3].set_ylabel("IQ_READBACK\nage (s)")
+    axes[3].set_xlabel("Time (s)")
+
+    plt.tight_layout()
+
+    if out_path is None:
+        out_path = os.path.splitext(csv_path)[0] + ".png"
+    plt.savefig(out_path, dpi=150)
+    plt.close(fig)  # important when called repeatedly from another script
+    return out_path
+
+
 def _detect_and_plot(csv_path):
     """
     Pick the right plotter by sniffing the CSV header, so the CLI accepts
-    either log format. Bilateral logs carry the 'pos_a'/'pos_b' columns;
-    position_hold logs carry 'target_pos'.
+    any log format. Bilateral logs carry 'pos_a'/'pos_b'; torque-tracking
+    logs carry 'step_idx'/'iq_err'; position_hold logs carry 'target_pos'.
     """
     with open(csv_path, newline="") as f:
         header = set(next(csv.reader(f), []))
     if {"pos_a", "pos_b"}.issubset(header):
         return plot_bilateral_log(csv_path)
+    if {"step_idx", "iq_err"}.issubset(header):
+        return plot_torque_tracking_log(csv_path)
     return plot_log(csv_path)
 
 
