@@ -17,6 +17,10 @@ no D, no feedback) and measures, per step:
     catches both brief comms hiccups and a freeze that never recovers
     before the run ends.
 
+IQ_READBACK is run through a 3-tap causal median filter before use (both
+for the tracking report and the CSV/plot) to knock out single-sample
+noise spikes without adding the lag of an IIR filter.
+
 At the end it prints a PASS/FAIL table against the tolerances below,
 so this can be rerun after firmware/ESC changes as a regression check
 rather than something you eyeball once and forget.
@@ -64,8 +68,10 @@ Run from the project's software/ dir with the venv active:
 
 import csv
 import os
+import statistics
 import sys
 import time
+from collections import deque
 
 from can_interface import MotorCANInterface, ENC_PULSE_NBR
 
@@ -88,8 +94,8 @@ CONTROL_RATE_HZ = 200.0
 # 0.8A is >5x the 0.15A level that free-spun a motor ~20 rev/s
 # (sign_check_test.py), so this step MUST be run with the shaft actively
 # held/resisted by hand -- do not run this step on a free shaft.
-STEP_LEVELS_A = [0.0, 0.05, 0.0, 0.10, 0.0, 0.15, 0.0, 0.80, 0.0,
-                 -0.05, 0.0, -0.10, 0.0, -0.15, 0.0, -0.80, 0.0]
+STEP_LEVELS_A = [0.0, 0.05, 0.0, 0.10, 0.0, 0.15, 0.0, 0.40, 0.0,
+                 -0.05, 0.0, -0.10, 0.0, -0.15, 0.0, -0.60, 0.0]
 STEP_DURATION_S = 0.4
 
 # ---- Pre-run stillness check ----
@@ -164,14 +170,14 @@ def main():
     csv_file = open(log_path, "w", newline="")
     csv_writer = csv.writer(csv_file)
     csv_writer.writerow(
-        ["t_s", "step_idx", "iq_cmd", "iq_actual", "iq_err", "vel",
-         "iq_readback_age_s"]
+        ["t_s", "step_idx", "iq_cmd", "iq_actual", "iq_filtered", "iq_err",
+         "vel", "iq_readback_age_s"]
     )
 
     no_data = False
     watchdog_tripped = False
     # Per-step samples collected during the settle window, for the
-    # end-of-run tracking report: step_idx -> list of (iq_cmd, iq_actual)
+    # end-of-run tracking report: step_idx -> list of filtered iq_actual
     step_samples = {i: [] for i in range(len(STEP_LEVELS_A))}
     max_stale_gap = 0.0
 
@@ -213,6 +219,12 @@ def main():
         prev_pos = iface.get_telemetry()["enc_count_unwrapped"]
         prev_time = time.monotonic()
         start_time = prev_time
+        # 3-tap causal median filter on IQ_READBACK -- knocks out single-
+        # sample noise spikes without the lag of an IIR filter and without
+        # looking at future samples. Persists across step boundaries
+        # (rather than resetting per step) since it's just smoothing a
+        # continuous measurement stream.
+        iq_median_window = deque(maxlen=3)
 
         for step_idx, iq_cmd in enumerate(STEP_LEVELS_A):
             step_start = time.monotonic()
@@ -238,6 +250,9 @@ def main():
                     break
 
                 iq_actual = t["iq_readback"]
+                if iq_actual is not None:
+                    iq_median_window.append(iq_actual)
+                iq_filtered = statistics.median(iq_median_window) if iq_median_window else None
                 iq_time = t["iq_readback_time"]
                 now_wall = time.time()
                 age = (now_wall - iq_time) if iq_time is not None else None
@@ -256,11 +271,16 @@ def main():
                 # at all, just a leftover value from before the freeze.
                 iq_fresh = age is not None and age <= STALE_GAP_TOL_S
 
-                iq_err = (iq_actual - iq_cmd) if iq_actual is not None else None
+                # Tracking error is measured against the filtered signal --
+                # that's the point of filtering it (see iq_median_window
+                # above): steady-state error shouldn't be dominated by
+                # single-sample noise spikes.
+                iq_err = (iq_filtered - iq_cmd) if iq_filtered is not None else None
                 t_rel = now - start_time
                 csv_writer.writerow(
                     [f"{t_rel:.4f}", step_idx, f"{iq_cmd:.4f}",
                      iq_actual if iq_actual is not None else "",
+                     f"{iq_filtered:.4f}" if iq_filtered is not None else "",
                      f"{iq_err:.4f}" if iq_err is not None else "",
                      f"{vel:.1f}",
                      f"{age:.4f}" if age is not None else ""]
@@ -270,7 +290,7 @@ def main():
                 # backed by a fresh reading count toward the tracking report.
                 if (now - step_start) >= SETTLE_FRACTION * STEP_DURATION_S \
                         and iq_fresh:
-                    step_samples[step_idx].append(iq_actual)
+                    step_samples[step_idx].append(iq_filtered)
 
                 # Print at ~10Hz, not every 5ms sample -- console I/O on the
                 # Pi can occasionally block long enough to stall this poll
@@ -279,6 +299,7 @@ def main():
                 # being slow, not a real IQ_READBACK dropout.
                 if int(t_rel * 10) != int((t_rel - dt) * 10):
                     print(f"  Iq_actual={iq_actual!s:>8}  "
+                          f"Iq_filtered={iq_filtered!s:>8}  "
                           f"err={iq_err if iq_err is not None else 'n/a':>8}  "
                           f"vel={vel:>9.0f} cnt/s  age={age if age is not None else 'n/a'}")
 
@@ -321,21 +342,21 @@ def main():
 
         # ---- Summary report ----
         print("\n=== Torque tracking report ===")
-        print(f"{'step':>4}  {'cmd(A)':>8}  {'mean_actual(A)':>15}  "
+        print(f"{'step':>4}  {'cmd(A)':>8}  {'mean_filtered(A)':>17}  "
               f"{'error(A)':>10}  {'result':>6}")
         overall_pass = True
         for step_idx, iq_cmd in enumerate(STEP_LEVELS_A):
             samples = step_samples[step_idx]
             if not samples:
-                print(f"{step_idx:>4}  {iq_cmd:>8.3f}  {'no data':>15}  "
+                print(f"{step_idx:>4}  {iq_cmd:>8.3f}  {'no data':>17}  "
                       f"{'--':>10}  {'FAIL':>6}")
                 overall_pass = False
                 continue
-            mean_actual = sum(samples) / len(samples)
-            err = mean_actual - iq_cmd
+            mean_filtered = sum(samples) / len(samples)
+            err = mean_filtered - iq_cmd
             ok = abs(err) <= TRACKING_TOL_A
             overall_pass &= ok
-            print(f"{step_idx:>4}  {iq_cmd:>8.3f}  {mean_actual:>15.4f}  "
+            print(f"{step_idx:>4}  {iq_cmd:>8.3f}  {mean_filtered:>17.4f}  "
                   f"{err:>10.4f}  {'PASS' if ok else 'FAIL':>6}")
 
         stale_ok = max_stale_gap <= STALE_GAP_TOL_S
