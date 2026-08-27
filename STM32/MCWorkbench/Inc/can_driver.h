@@ -40,4 +40,12 @@ void CAN_Driver_Init(FDCAN_HandleTypeDef* hfdcan);
 void CAN_ProcessPendingMessages(void);
 void CAN_SendTelemetry(void);
 
+/* Tx-FIFO-full drop counters, incremented in CAN_SendTelemetry() when
+ * HAL_FDCAN_AddMessageToTxFifoQ() fails for that message. Not currently
+ * exposed via the MC register interface -- see MC_REG_SECTOR in
+ * sync_registers.c for the pattern if that's added later. */
+uint32_t CAN_GetIqTxDropCount(void);
+uint32_t CAN_GetAngleTxDropCount(void);
+uint32_t CAN_GetEncTxDropCount(void);
+
 #endif /* CAN_DRIVER_H */

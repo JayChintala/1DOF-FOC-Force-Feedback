@@ -25,6 +25,20 @@ typedef struct {
 
 static volatile CAN_CmdState_t s_cmd = {0};
 
+/* Incremented whenever HAL_FDCAN_AddMessageToTxFifoQ() fails for the
+ * corresponding telemetry message (e.g. hardware Tx FIFO still full because
+ * this node keeps losing arbitration to a lower-ID node on the bus). Not
+ * wired into the MC register interface yet (see MC_REG_SECTOR in
+ * sync_registers.c for the pattern to follow) -- these accessors exist so
+ * that can be added without touching this file again. */
+static volatile uint32_t s_iqTxDropCount = 0;
+static volatile uint32_t s_angleTxDropCount = 0;
+static volatile uint32_t s_encTxDropCount = 0;
+
+uint32_t CAN_GetIqTxDropCount(void) { return s_iqTxDropCount; }
+uint32_t CAN_GetAngleTxDropCount(void) { return s_angleTxDropCount; }
+uint32_t CAN_GetEncTxDropCount(void) { return s_encTxDropCount; }
+
 void CAN_Driver_Init(FDCAN_HandleTypeDef* hfdcan) {
   s_hfdcan = hfdcan;
 
@@ -139,13 +153,22 @@ void CAN_SendTelemetry(void) {
 
   hdr.Identifier = CAN_ID_IQ_READBACK(CAN_NODE_BASE);
   hdr.DataLength = FDCAN_DLC_BYTES_4;
-  HAL_FDCAN_AddMessageToTxFifoQ(s_hfdcan, &hdr, (uint8_t*)&iqd.q);
+  if (HAL_FDCAN_AddMessageToTxFifoQ(s_hfdcan, &hdr, (uint8_t*)&iqd.q) !=
+      HAL_OK) {
+    s_iqTxDropCount++;
+  }
 
   hdr.Identifier = CAN_ID_ELEC_ANGLE(CAN_NODE_BASE);
   hdr.DataLength = FDCAN_DLC_BYTES_2;
-  HAL_FDCAN_AddMessageToTxFifoQ(s_hfdcan, &hdr, (uint8_t*)&elAngle);
+  if (HAL_FDCAN_AddMessageToTxFifoQ(s_hfdcan, &hdr, (uint8_t*)&elAngle) !=
+      HAL_OK) {
+    s_angleTxDropCount++;
+  }
 
   hdr.Identifier = CAN_ID_ENC_COUNT(CAN_NODE_BASE);
   hdr.DataLength = FDCAN_DLC_BYTES_4;
-  HAL_FDCAN_AddMessageToTxFifoQ(s_hfdcan, &hdr, (uint8_t*)&encCount);
+  if (HAL_FDCAN_AddMessageToTxFifoQ(s_hfdcan, &hdr, (uint8_t*)&encCount) !=
+      HAL_OK) {
+    s_encTxDropCount++;
+  }
 }
