@@ -4,7 +4,7 @@ Shared plotting utilities for the motor test CSV logs.
 Each test writes its own CSV schema and calls the matching plotter here, so
 all plotting code lives in one place rather than being duplicated per test:
   - plot_log                  <- position_hold_test.py   (single-motor PD hold)
-  - plot_bilateral_log        <- bilateral_test.py        (two-motor coupling)
+  - plot_position_mirror_log        <- position_mirror_test.py        (two-motor coupling)
   - plot_torque_tracking_log  <- torque_tracking_test.py  (open-loop Iq steps)
   - plot_iq_probe_log         <- iq_readback_probe.py     (back-drive sensing probe)
 
@@ -13,8 +13,8 @@ Can be used two ways:
          from plot_run import plot_log
          plot_log("logs/position_hold_....csv")
 
-         from plot_run import plot_bilateral_log
-         plot_bilateral_log("logs/bilateral_....csv")
+         from plot_run import plot_position_mirror_log
+         plot_position_mirror_log("logs/position_mirror_....csv")
 
          from plot_run import plot_torque_tracking_log
          plot_torque_tracking_log("logs/torque_tracking....csv")
@@ -25,7 +25,7 @@ Can be used two ways:
   2. Run standalone from the command line -- the format is auto-detected
      from the CSV header, so either log type works:
          python3 plot_run.py logs/position_hold_....csv
-         python3 plot_run.py logs/bilateral_....csv
+         python3 plot_run.py logs/position_mirror_....csv
 
 Each produces a diagnostic PNG next to the CSV (same name, .png extension).
 
@@ -114,9 +114,9 @@ def plot_log(csv_path, out_path=None):
     return out_path
 
 
-def load_bilateral_log(path):
+def load_position_mirror_log(path):
     """
-    Load a bilateral_test.py CSV. iq_*_actual columns may be blank in a row
+    Load a position_mirror_test.py CSV. iq_*_actual columns may be blank in a row
     (telemetry not yet seen), so those are kept nullable and filtered by the
     plotter; every other column is numeric.
     """
@@ -138,9 +138,9 @@ def load_bilateral_log(path):
     return rows
 
 
-def plot_bilateral_log(csv_path, out_path=None):
+def plot_position_mirror_log(csv_path, out_path=None):
     """
-    Read a bilateral_test.py CSV log and save a 4-panel diagnostic PNG.
+    Read a position_mirror_test.py CSV log and save a 4-panel diagnostic PNG.
     Returns the output path, or None if there was no data to plot.
 
     Panels (shared time axis):
@@ -157,7 +157,7 @@ def plot_bilateral_log(csv_path, out_path=None):
     out_path: optional explicit output path; defaults to csv_path with the
               extension swapped to .png.
     """
-    data = load_bilateral_log(csv_path)
+    data = load_position_mirror_log(csv_path)
 
     if not data["t"]:
         print(f"No data rows found in {csv_path} -- nothing to plot.")
@@ -390,7 +390,7 @@ def _detect_and_plot(csv_path):
     with open(csv_path, newline="") as f:
         header = set(next(csv.reader(f), []))
     if {"pos_a", "pos_b"}.issubset(header):
-        return plot_bilateral_log(csv_path)
+        return plot_position_mirror_log(csv_path)
     if {"step_idx", "iq_err"}.issubset(header):
         return plot_torque_tracking_log(csv_path)
     if {"iq", "pos_rev"}.issubset(header):

@@ -1,20 +1,22 @@
 """
 Force-mirroring test -- the core 1DOF force-feedback loop.
 
-Motor 1 (ESC 1) is commanded to zero torque and left free to be
-back-driven by hand. Its actual Iq (IQ_READBACK telemetry) reflects
-whatever force is being applied to its shaft. Motor 2 (ESC 2) is
-commanded to match that Iq in real time, at 1:1 gain -- so Motor 2
-should push/resist with roughly the same torque Motor 1 is feeling.
+Motor 1 (ESC 1) is kept energized with a small nonzero Iq command so
+the firmware produces useful IQ_READBACK telemetry. If Motor 1 is
+resisted or back-driven, its sensed current is forwarded to Motor 2
+(ESC 2) in real time, at 1:1 gain -- so Motor 2 should push/resist
+with roughly the same torque Motor 1 is feeling.
 
 SAFETY:
-  - Both motors MUST be mechanically secured before running this.
-    Motor 2 will move in response to whatever Motor 1's shaft
-    experiences -- an unsecured Motor 2 driven by someone twisting
-    Motor 1 by hand is a real pinch/contact hazard (see sign-check
-    test results: 0.15A alone spun a free motor ~20 rev/s).
-  - IQ_MAX_A below is a hard safety clamp applied to every command
-    sent to Motor 2, independent of whatever Motor 1 reports.
+    - Both motors MUST be mechanically secured before running this.
+        Motor 2 will move in response to whatever Motor 1's shaft
+        experiences -- an unsecured Motor 2 driven by someone twisting
+        Motor 1 by hand is a real pinch/contact hazard (see sign-check
+        test results: 0.15A alone spun a free motor ~20 rev/s).
+    - M1_IQ_COMMAND_A is the deliberate excitation applied to Motor 1.
+        Keep it small until the rig's behavior is understood.
+    - IQ_MAX_A below is a hard safety clamp applied to every command
+        sent to Motor 2, independent of whatever Motor 1 reports.
   - A telemetry staleness watchdog zeroes Motor 2's torque if Motor
     1's IQ_READBACK hasn't updated recently -- prevents Motor 2
     continuing on a stale/last-known value if the CAN link hiccups.
@@ -33,6 +35,7 @@ LOOP_HZ = 200.0
 LOOP_PERIOD_S = 1.0 / LOOP_HZ
 
 MIRROR_GAIN = 1.0          # 1:1 direct mirror, per current test plan
+M1_IQ_COMMAND_A = 0.15     # nonzero excitation required for IQ_READBACK
 IQ_MAX_A = 0.3             # hard safety clamp on what Motor 2 is ever sent
 
 STALE_TIMEOUT_S = 0.05     # if Motor 1's IQ_READBACK is older than this,
@@ -61,23 +64,20 @@ def main():
     stale_count = 0
 
     try:
-        print("Confirm BOTH motors are mechanically secured before continuing.")
-        input("Press Enter to START both motors and begin mirroring (Ctrl+C to abort)...")
-
         print("Starting Motor 1 (sensing side)...")
         m1.send_start()
         time.sleep(0.2)
-        m1.send_set_iq(0.0)  # Motor 1 target is zero -- it should be freely
-                             # back-driveable; IQ_READBACK reflects actual
-                             # applied force, not a commanded torque.
+        m1.send_set_iq(M1_IQ_COMMAND_A)
 
         print("Starting Motor 2 (mirroring side)...")
         m2.send_start()
         time.sleep(0.2)
         m2.send_set_iq(0.0)
 
-        print(f"Mirroring at {LOOP_HZ:.0f} Hz, gain={MIRROR_GAIN}, "
-              f"clamp=+-{IQ_MAX_A}A. Ctrl+C to stop.\n")
+        print(
+            f"Mirroring at {LOOP_HZ:.0f} Hz, M1_IQ={M1_IQ_COMMAND_A}A, "
+            f"gain={MIRROR_GAIN}, clamp=+-{IQ_MAX_A}A. Ctrl+C to stop.\n"
+        )
 
         next_tick = time.time()
         while True:
@@ -98,6 +98,8 @@ def main():
             else:
                 iq2_cmd = clamp(iq1 * MIRROR_GAIN, IQ_MAX_A)
                 m2.send_set_iq(iq2_cmd)
+
+            m1.send_set_iq(M1_IQ_COMMAND_A)
 
             next_tick += LOOP_PERIOD_S
             sleep_time = next_tick - time.time()

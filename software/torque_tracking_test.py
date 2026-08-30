@@ -2,7 +2,7 @@
 Torque-tracking verification test.
 
 Every closed-loop test in this project (position_hold_test.py,
-force_mirror_test.py, bilateral_test.py) is built on one unverified
+force_mirror_test.py, position_mirror_test.py) is built on one unverified
 assumption: that IQ_READBACK is an accurate, promptly-reported measure
 of the current the motor is actually producing. position_hold_test.py
 demonstrates the torque interface works *by feel* -- push the shaft,
@@ -27,7 +27,7 @@ rather than something you eyeball once and forget.
 
 Motor should be free-spinning / unloaded -- this measures the current
 loop's own tracking and reporting, not the mechanical response to an
-external load (that's what force_mirror_test.py and bilateral_test.py
+external load (that's what force_mirror_test.py and position_mirror_test.py
 are for).
 
 SAFETY:
@@ -183,11 +183,9 @@ def main():
 
     try:
         max_level = max(abs(v) for v in STEP_LEVELS_A)
-        print(f"Sequence peaks at {max_level:.2f}A. Confirm the shaft is actively "
-              f"held/resisted by hand for this run before continuing -- this level "
-              f"is well past what's safe to run on a free/unrestrained shaft.")
-        input("Press Enter to START and begin the torque-tracking sequence "
-              "(Ctrl+C to abort)...")
+        print(f"Sequence peaks at {max_level:.2f}A. Shaft must be actively "
+              f"held/resisted by hand for this run -- this level is well past "
+              f"what's safe to run on a free/unrestrained shaft.")
 
         print("Sending START...")
         iface.send_start()

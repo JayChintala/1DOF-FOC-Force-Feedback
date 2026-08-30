@@ -10,11 +10,6 @@ Every run writes a timestamped CSV to ./logs/ in addition to printing
 to the console, so you can plot it afterward with plot_run.py instead
 of copy-pasting terminal output.
 
-This is a functional demonstration, not a tuned controller -- if you
-push the shaft, you should feel it resist and spring back toward the
-starting position. That's the torque loop actively responding to
-disturbance, not just holding a static current.
-
 SAFETY: Iq is clamped to IQ_MAX_A below. Start low. If the shaft
 oscillates/buzzes uncontrollably instead of settling, KP is too high
 relative to KD -- lower KP or raise KD before increasing either further.
@@ -22,27 +17,12 @@ Conversely, if Iq_cmd is slamming between +IQ_MAX_A and -IQ_MAX_A almost
 every sample (visible clearly in the plot), KD is too high relative to
 sensor noise/loop delay -- that's derivative kick, not underdamping.
 
-This version adds two things the earlier iteration didn't have:
-  1. A runaway watchdog: if |error| or |velocity| exceeds a hard limit,
-     torque is zeroed and the run aborts immediately. This exists because
-     multiple prior sessions on this exact hardware required a manual
-     Ctrl+C during multi-second high-speed runaways.
-  2. An EMA low-pass filter on the velocity estimate used for the KD
-     term. Raw diff-based velocity was noisy enough to cause inconsistent
-     behavior run-to-run at identical gains. Set VEL_FILTER_ALPHA = 1.0
-     to disable filtering entirely (i.e. use raw velocity) if you want
-     to A/B it against the filtered case.
-
-It assumes a fixed sign convention (SIGN constant below) rather than
-probing it with an open-loop pulse, since positive-Iq-direction has
-flipped between sessions on this exact hardware for reasons not yet
-root-caused, and probing it directly was itself causing problems (see
-comment above SIGN).
-
 Run from the project's software/ dir with the venv active:
-    python3 position_hold_test.py
+    python3 position_hold_test.py            # ESC 1 (default)
+    python3 position_hold_test.py --esc 2    # ESC 2
 """
 
+import argparse
 import csv
 import os
 import sys
@@ -51,9 +31,12 @@ import time
 from can_interface import MotorCANInterface, ENC_PULSE_NBR
 from plot_run import plot_log
 
+# ---- ESC selection ----
+# ESC 1: CAN_NODE_ID = 0 -> node_base = 0x000
+# ESC 2: CAN_NODE_ID = 1 -> node_base = 0x020
+ESC_NODE_BASE = {1: 0x000, 2: 0x020}
+
 # ---- Tuning ----
-# Reset to the best confirmed-stable reference point from prior sessions.
-# (Do not reintroduce untested gains at the same time as new safety code.)
 KP = 0.000265
 KD = 0.00001
 IQ_MAX_A = 0.8
@@ -68,22 +51,10 @@ RUN_DURATION_S = 15.0
 VEL_FILTER_ALPHA = .25
 
 # ---- Watchdog ----
-# These are deliberately loose first-pass limits, not tuned to this plant.
-# Tighten once you have a feel for normal excursion size during a push test.
 WATCHDOG_VEL_LIMIT_CNT_S = 200_000.0   # counts/s
 WATCHDOG_ERROR_LIMIT_CNT = 40000.0    # counts (10 rotations @ 4000 cnt/rev)
 
 # ---- Sign convention ----
-# Positive-Iq direction has flipped between sessions on this exact hardware
-# for reasons not yet root-caused. Rather than probing it with an open-loop
-# current pulse (which on this near-frictionless plant leaves the shaft
-# actually coasting afterward -- zero current does not mean zero velocity
-# here -- and was tripping the watchdog on frame 1), we assume a sign and
-# let the watchdog catch it cheaply if wrong: a closed-loop PD with the
-# wrong sign diverges fast (error grows monotonically instead of settling),
-# so a bad sign shows up as an immediate watchdog trip with error growing
-# in one direction, not as banked-up real velocity.
-# If that happens: flip this to -1 and rerun.
 SIGN = 1
 
 LOG_DIR = "logs"
@@ -93,16 +64,28 @@ def clamp(value, lo, hi):
     return max(lo, min(hi, value))
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Position-hold demo (see module docstring for details).")
+    parser.add_argument(
+        "--esc", type=int, choices=sorted(ESC_NODE_BASE), default=1,
+        help="Which ESC/motor to hold position on (default: 1).",
+    )
+    return parser.parse_args()
+
+
 def main():
+    args = parse_args()
+    node_base = ESC_NODE_BASE[args.esc]
+
     os.makedirs(LOG_DIR, exist_ok=True)
-    base_name = f"position_hold_KP{KP:g}_KD{KD:g}_A{IQ_MAX_A:g}"
+    base_name = f"position_hold_esc{args.esc}_KP{KP:g}_KD{KD:g}_A{IQ_MAX_A:g}"
     log_path = os.path.join(LOG_DIR, f"{base_name}.csv")
     suffix = 2
     while os.path.exists(log_path):
         log_path = os.path.join(LOG_DIR, f"{base_name}_{suffix}.csv")
         suffix += 1
 
-    iface = MotorCANInterface(channel="can0")
+    iface = MotorCANInterface(channel="can0", node_base=node_base)
     iface.start_listening()
 
     csv_file = open(log_path, "w", newline="")
@@ -115,6 +98,7 @@ def main():
     no_data = False
 
     try:
+        print(f"Using ESC {args.esc} (node_base=0x{node_base:03x})")
         print("Sending START...")
         iface.send_start()
         time.sleep(0.2)

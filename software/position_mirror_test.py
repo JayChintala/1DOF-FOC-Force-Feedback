@@ -1,5 +1,5 @@
 """
-Bilateral (position-coupled) force-feedback test -- the real 1DOF haptic loop.
+Position-mirror (position-coupled) force-feedback test -- the real 1DOF haptic loop.
 
 Two motors are linked by a virtual spring+damper computed on the Pi. Each
 is a torque source (FOC SET_IQ); the commanded torque is proportional to
@@ -37,14 +37,14 @@ SAFETY:
   - Ctrl+C zeros and stops both motors.
 
 Every run writes a timestamped-name CSV to ./logs/ and, on exit, renders a
-4-panel PNG next to it via plot_run.plot_bilateral_log(), so you can inspect
-the coupling afterward instead of reading the scrolling console.
+4-panel PNG next to it via plot_run.plot_position_mirror_log(), so you can
+inspect the coupling afterward instead of reading the scrolling console.
 
 Run from software/ with the venv active:
-    python3 bilateral_test.py
+    python3 position_mirror_test.py
 
 Re-plot an existing log without re-running the motors:
-    python3 plot_run.py logs/bilateral_KP0.00026_KD1e-05_A0.8.csv
+    python3 plot_run.py logs/position_mirror_KP0.00026_KD1e-05_A0.8.csv
 """
 
 import csv
@@ -53,7 +53,7 @@ import sys
 import time
 
 from can_interface import MotorCANInterface, ENC_PULSE_NBR
-from plot_run import plot_bilateral_log
+from plot_run import plot_position_mirror_log
 
 # ---- Nodes ----
 # A and B are symmetric; label them however your rig is wired.
@@ -62,13 +62,14 @@ NODE_BASE_B = 0x020    # e.g. robot CAN address
 
 # ---- Tuning ----
 # Starting point carried over from position_hold_test.py's stable gains.
-KP = 0.00026           # A/count of relative position error
+KP = 0.000265           # A/count of relative position error
 KD = 0.00001           # A/(count/s) of relative velocity
 IQ_MAX_A = 0.8         # hard per-motor clamp (below position_hold's 0.8 for
-                       # a first bilateral bring-up -- raise once it feels safe)
+                       # a first position-mirror bring-up -- raise once it feels safe)
 
-CONTROL_RATE_HZ = 300.0
-RUN_DURATION_S = 30.0
+CONTROL_RATE_HZ = 5
+00.0
+RUN_DURATION_S = 10.0
 
 # ---- Velocity filter (per shaft) ----
 # EMA: vel_filt = ALPHA*vel_raw + (1-ALPHA)*vel_filt_prev. 1.0 disables.
@@ -92,7 +93,7 @@ def clamp(value, lo, hi):
 
 def main():
     """
-    Run the position-coupled bilateral loop end to end.
+    Run the position-coupled mirror loop end to end.
 
     Sequence: START both motors -> command zero torque so alignment settles
     -> capture each shaft's baseline position -> run the fixed-rate coupling
@@ -101,7 +102,7 @@ def main():
     and render the diagnostic PNG. Returns None (process exit code 0).
     """
     os.makedirs(LOG_DIR, exist_ok=True)
-    base_name = f"bilateral_KP{KP:g}_KD{KD:g}_A{IQ_MAX_A:g}"
+    base_name = f"position_mirror_KP{KP:g}_KD{KD:g}_A{IQ_MAX_A:g}"
     log_path = os.path.join(LOG_DIR, f"{base_name}.csv")
     suffix = 2
     while os.path.exists(log_path):
@@ -124,9 +125,6 @@ def main():
     stale_count = 0
 
     try:
-        print("Confirm BOTH motors are mechanically secured before continuing.")
-        input("Press Enter to START both motors and begin coupling (Ctrl+C to abort)...")
-
         print("Sending START to both...")
         a.send_start()
         b.send_start()
@@ -275,7 +273,7 @@ def main():
             print("No data logged (aborted before run started) -- log discarded.")
         else:
             print(f"Log saved: {log_path}")
-            png_path = plot_bilateral_log(log_path)
+            png_path = plot_position_mirror_log(log_path)
             if png_path:
                 print(f"Plot saved: {png_path}")
 
