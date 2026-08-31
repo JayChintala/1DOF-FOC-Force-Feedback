@@ -95,28 +95,179 @@ class EncoderUnwrapper:
         self._revolutions = 0
 
 
+
+# ---- Shared bus ------------------------------------------------------------
+# Subscribe to ELEC_ANGLE? Default off. Nothing in this repo reads
+# elec_angle_deg (it's the FOC electrical angle, which wraps once per pole
+# pair -- a commutation/alignment diagnostic, not a position source), and it
+# is a third of the bus traffic. Left off, the kernel discards those frames
+# before Python ever sees them. Flip to True if you need the field.
+SUBSCRIBE_ELEC_ANGLE = False
+
+
+class _SharedBus:
+    """
+    One SocketCAN socket and one RX thread for the whole process, shared by
+    every MotorCANInterface on the same channel.
+
+    WHY: each interface used to open its OWN unfiltered socket, so with two
+    motors every frame on the bus was delivered twice and parsed twice in
+    Python, ~12000 _handle_message calls/s under the GIL for 6000 frames/s of
+    telemetry. telemetry_rate_probe.py measured the cost: 2.6% of frames
+    handled more than 5 ms after they arrived, p99 ~33 ms, worst 48 ms, in
+    bursts where the RX thread simply did not run -- plus ~0.2% lost to
+    socket-queue overflow. The same probe measured one filtered socket on the
+    same wire at a p99 of 0.27 ms with nothing over 5 ms.
+
+    Two things fix it, both here:
+      - one socket instead of one per motor, so each frame is parsed once;
+      - kernel-side filters (can_filters) for only the IDs actually read, so
+        the ~2000 frames/s of ELEC_ANGLE never cross into user space at all.
+
+    Registration is dynamic: interfaces come and go with start_listening() /
+    stop_listening(), and the filter set is recomputed each time. The socket
+    opens on the first registration and closes on the last.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._send_lock = threading.Lock()
+        self._buses = {}        # channel -> can.Bus
+        self._nodes = {}        # channel -> {arb_id -> [interface, ...]}
+        self._threads = {}      # channel -> Thread
+        self._running = {}      # channel -> bool
+        self._refcount = {}     # channel -> int
+
+    def _filters_for(self, channel):
+        return [{"can_id": arb_id, "can_mask": 0x7FF}
+                for arb_id in sorted(self._nodes.get(channel, {}))]
+
+    def register(self, iface, channel, bustype):
+        """Subscribe iface's telemetry IDs and make sure the RX thread runs."""
+        with self._lock:
+            arb_ids = [iface._id_iq_readback, iface._id_enc_count]
+            if SUBSCRIBE_ELEC_ANGLE:
+                arb_ids.append(iface._id_elec_angle)
+
+            table = self._nodes.setdefault(channel, {})
+            for arb_id in arb_ids:
+                table.setdefault(arb_id, []).append(iface)
+            self._refcount[channel] = self._refcount.get(channel, 0) + 1
+
+            if channel not in self._buses:
+                self._buses[channel] = can.interface.Bus(
+                    channel=channel, bustype=bustype,
+                    can_filters=self._filters_for(channel),
+                )
+            else:
+                # A later interface widens the filter set on the live socket.
+                self._buses[channel].set_filters(self._filters_for(channel))
+
+            if not self._running.get(channel):
+                self._running[channel] = True
+                th = threading.Thread(target=self._rx_loop, args=(channel,),
+                                      daemon=True)
+                self._threads[channel] = th
+                th.start()
+            return self._buses[channel]
+
+    def unregister(self, iface, channel):
+        """Drop iface's subscriptions; close the socket once nobody is left."""
+        with self._lock:
+            table = self._nodes.get(channel, {})
+            for arb_id in list(table):
+                table[arb_id] = [i for i in table[arb_id] if i is not iface]
+                if not table[arb_id]:
+                    del table[arb_id]
+            self._refcount[channel] = max(0, self._refcount.get(channel, 0) - 1)
+            if self._refcount[channel] > 0:
+                if table:
+                    self._buses[channel].set_filters(self._filters_for(channel))
+                return
+            self._running[channel] = False
+            th = self._threads.pop(channel, None)
+            bus = self._buses.pop(channel, None)
+        # Join and shut down outside the lock: the RX thread takes it.
+        if th is not None:
+            th.join(timeout=1.0)
+        if bus is not None:
+            bus.shutdown()
+
+    def send(self, channel, msg, bustype="socketcan"):
+        with self._lock:
+            bus = self._buses.get(channel)
+            if bus is None:
+                # Sending before start_listening() used to work, because the
+                # socket was opened in MotorCANInterface.__init__. Preserve
+                # that: open it here, send-only for now. A later register()
+                # will widen the filters for whatever wants to receive.
+                bus = can.interface.Bus(channel=channel, bustype=bustype,
+                                        can_filters=self._filters_for(channel))
+                self._buses[channel] = bus
+        # One socket now serves every motor, so sends from different threads
+        # are serialised rather than relying on per-frame write atomicity.
+        with self._send_lock:
+            bus.send(msg)
+
+    def _rx_loop(self, channel):
+        bus = self._buses[channel]
+        while self._running.get(channel):
+            try:
+                msg = bus.recv(timeout=0.5)
+            except Exception:
+                if not self._running.get(channel):
+                    break
+                raise
+            if msg is None:
+                continue
+            # Filters are kernel-side, so anything arriving here is wanted by
+            # at least one interface. No per-frame dict copy, no lock: read a
+            # snapshot of the subscriber list and dispatch.
+            for iface in self._nodes.get(channel, {}).get(msg.arbitration_id, ()):
+                iface._handle_message(msg)
+
+
+_shared_bus = _SharedBus()
+
+
 class MotorCANInterface:
     """
-    Background-thread CAN interface, one instance per node (per motor).
+    CAN interface for one node (one motor). Public API unchanged:
+    start_listening() / stop_listening() / send_start() / send_stop() /
+    send_set_iq() / get_telemetry().
 
-    A daemon thread continuously reads incoming frames and updates the
-    latest telemetry values under a lock. Command sends are synchronous
-    and non-blocking (fire-and-forget, matching the no-ack protocol
-    described).
+    The socket and RX thread are NOT per-instance any more -- they live in
+    the process-wide _SharedBus above, which explains why. Telemetry values
+    are still per-instance, updated under this instance's own lock.
+
+    Command sends are synchronous and non-blocking (fire-and-forget,
+    matching the no-ack protocol described).
 
     Each telemetry signal (IQ_READBACK, ELEC_ANGLE, ENC_COUNT) has its
     own timestamp (iq_readback_time / elec_angle_time / enc_count_time)
     so callers can tell which specific signal is stale, rather than
     relying on a single last_rx_time shared across all three.
 
-    Multiple instances (one per node_base) can share the same physical
-    can0 bus -- each instance only reacts to its own node's IDs.
+    Those timestamps are taken when the RX thread PARSES the frame, which
+    is not when the frame arrived -- see _SharedBus for the measured gap.
+    enc_count_bus_time / iq_readback_bus_time carry the KERNEL's receive
+    timestamp (msg.timestamp) instead, which is when the frame actually
+    landed. Use those two for anything latency- or velocity-related, and the
+    parse-time ones only for "is this link alive".
+
+    Multiple instances (one per node_base) share the same physical bus and
+    the same socket; each only sees its own node's IDs, because the dispatch
+    table in _SharedBus is keyed by arbitration ID.
     """
 
     def __init__(self, channel: str = "can0", bustype: str = "socketcan", node_base: int = 0x000):
-        self.bus = can.interface.Bus(channel=channel, bustype=bustype)
         self._unwrapper = EncoderUnwrapper()
         self.node_base = node_base
+        self._channel = channel
+        self._bustype = bustype
+        # Opened by start_listening() via the shared registry, not here --
+        # the socket is process-wide, so it cannot belong to one instance.
+        self.bus = None
 
         # Per-instance IDs, computed once from this node's base offset.
         self._id_start = node_base + OFFSET_START
@@ -138,49 +289,57 @@ class MotorCANInterface:
         self.elec_angle_time = None
         self.enc_count_time = None
 
+        # Kernel (SocketCAN) receive timestamps -- when the frame arrived,
+        # as opposed to when this thread got around to parsing it. See the
+        # class docstring: the difference is not small.
+        self.iq_readback_bus_time = None
+        self.enc_count_bus_time = None
+
         self._lock = threading.Lock()
-        self._running = False
-        self._rx_thread = None
+        self._listening = False
 
     # ---- lifecycle ----
     def start_listening(self):
-        self._running = True
-        self._rx_thread = threading.Thread(target=self._rx_loop, daemon=True)
-        self._rx_thread.start()
+        if self._listening:
+            return
+        self.bus = _shared_bus.register(self, self._channel, self._bustype)
+        self._listening = True
 
     def stop_listening(self):
-        self._running = False
-        if self._rx_thread is not None:
-            self._rx_thread.join(timeout=1.0)
-        self.bus.shutdown()
+        if not self._listening:
+            return
+        self._listening = False
+        _shared_bus.unregister(self, self._channel)
+        self.bus = None
 
     # ---- commands (Pi -> MCU) ----
     def send_start(self):
-        self.bus.send(can.Message(arbitration_id=self._id_start, data=b"", is_extended_id=False))
+        _shared_bus.send(self._channel, can.Message(
+            arbitration_id=self._id_start, data=b"", is_extended_id=False),
+            self._bustype)
 
     def send_stop(self):
-        self.bus.send(can.Message(arbitration_id=self._id_stop, data=b"", is_extended_id=False))
+        _shared_bus.send(self._channel, can.Message(
+            arbitration_id=self._id_stop, data=b"", is_extended_id=False),
+            self._bustype)
 
     def send_set_iq(self, amps: float):
         payload = struct.pack("<f", amps)
-        self.bus.send(can.Message(arbitration_id=self._id_set_iq, data=payload, is_extended_id=False))
+        _shared_bus.send(self._channel, can.Message(
+            arbitration_id=self._id_set_iq, data=payload, is_extended_id=False),
+            self._bustype)
 
     # ---- telemetry (MCU -> Pi) ----
-    def _rx_loop(self):
-        while self._running:
-            msg = self.bus.recv(timeout=0.5)
-            if msg is None:
-                continue
-            self._handle_message(msg)
-
     def _handle_message(self, msg: "can.Message"):
-        # Messages for other nodes on the same bus are silently ignored --
-        # each MotorCANInterface instance only reacts to its own node_base.
+        # Called from the shared RX thread, which only routes the IDs this
+        # instance subscribed to. The per-ID checks below still stand, so the
+        # method stays correct if it is ever handed an unrelated frame.
         with self._lock:
             now = time.time()
             if msg.arbitration_id == self._id_iq_readback and len(msg.data) >= 4:
                 (self.iq_readback,) = struct.unpack("<f", msg.data[:4])
                 self.iq_readback_time = now
+                self.iq_readback_bus_time = msg.timestamp
             elif msg.arbitration_id == self._id_elec_angle and len(msg.data) >= 2:
                 (raw,) = struct.unpack("<h", msg.data[:2])
                 self.elec_angle_deg = raw * DPP_TO_DEG
@@ -190,6 +349,7 @@ class MotorCANInterface:
                 self.enc_count_raw = raw
                 self.enc_count_unwrapped = self._unwrapper.update(raw)
                 self.enc_count_time = now
+                self.enc_count_bus_time = msg.timestamp
             else:
                 return  # not this node's message -- don't update last_rx_time
             self.last_rx_time = now
@@ -205,4 +365,6 @@ class MotorCANInterface:
                 "iq_readback_time": self.iq_readback_time,
                 "elec_angle_time": self.elec_angle_time,
                 "enc_count_time": self.enc_count_time,
+                "iq_readback_bus_time": self.iq_readback_bus_time,
+                "enc_count_bus_time": self.enc_count_bus_time,
             }

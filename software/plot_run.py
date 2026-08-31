@@ -477,13 +477,32 @@ def load_teleop_log(path):
     Load a teleop_test.py CSV. iq_a_readback/iq_b_readback may be blank in
     a row (telemetry not yet seen), so those are kept nullable; every
     other column is numeric.
+
+    The latency-instrumentation columns (enc_age_a/enc_age_b/iq_age_a/
+    enc_lag_a/enc_lag_b/fresh_a/fresh_b/loop_dt) are absent from logs
+    recorded before they were added, so they're read only if the header carries them -- older logs
+    still load and plot, just without the latency panel.
     """
     rows = {k: [] for k in ("t", "d_a", "d_b", "err", "vel_a", "vel_b",
                              "iq_a_cmd", "iq_a_readback", "iq_a_filt",
-                             "iq_b_cmd", "iq_b_readback")}
+                             "iq_b_cmd", "iq_b_readback",
+                             "enc_age_a", "enc_age_b", "iq_age_a",
+                             "enc_lag_a", "enc_lag_b",
+                             "fresh_a", "fresh_b", "loop_dt",
+                             "tau_h", "iq_a_ff")}
     with open(path, newline="") as f:
         r = csv.DictReader(f)
+        has_latency = r.fieldnames is not None and "enc_age_a" in r.fieldnames
+        has_obs = r.fieldnames is not None and "tau_h" in r.fieldnames
         for row in r:
+            if has_obs:
+                for k in ("tau_h", "iq_a_ff"):
+                    rows[k].append(float(row[k]) if row[k] else None)
+            if has_latency:
+                for k in ("enc_age_a", "enc_age_b", "iq_age_a",
+                          "enc_lag_a", "enc_lag_b",
+                          "fresh_a", "fresh_b", "loop_dt"):
+                    rows[k].append(float(row[k]) if row[k] else None)
             rows["t"].append(float(row["t_s"]))
             rows["d_a"].append(float(row["d_a"]))
             rows["d_b"].append(float(row["d_b"]))
@@ -500,8 +519,10 @@ def load_teleop_log(path):
 
 def plot_teleop_log(csv_path, out_path=None):
     """
-    Read a teleop_test.py CSV log and save a 4-panel diagnostic PNG.
-    Returns the output path, or None if there was no data to plot.
+    Read a teleop_test.py CSV log and save a 4- or 5-panel diagnostic PNG
+    (the 5th, latency, panel appears only for logs that carry the
+    instrumentation columns). Returns the output path, or None if there was
+    no data to plot.
 
     Panels (shared time axis):
       1. Displacement of each shaft from its baseline (d_a vs d_b) -- how
@@ -513,6 +534,13 @@ def plot_teleop_log(csv_path, out_path=None):
       4. Motor B (controller) current: commanded vs measured readback --
          the force reflected back to the hand from Motor A's filtered
          current (Channel 2).
+      5. Telemetry age, RX handling lag and loop period (ms), plus the
+         fraction of recent iterations that saw a new encoder sample -- the
+         phase lag actually present in the loop. Ages are measured from the
+         kernel's receive timestamp; the handling-lag traces are the part of
+         that age caused by this process parsing the frame late (measured
+         p99 ~33 ms for the second interface, see telemetry_rate_probe.py).
+         Only drawn if the log has those columns.
 
     csv_path: path to the CSV log.
     out_path: optional explicit output path; defaults to csv_path with the
@@ -524,7 +552,9 @@ def plot_teleop_log(csv_path, out_path=None):
         print(f"No data rows found in {csv_path} -- nothing to plot.")
         return None
 
-    fig, axes = plt.subplots(4, 1, figsize=(11, 12), sharex=True)
+    has_latency = any(v is not None for v in data["enc_age_a"])
+    n_panels = 5 if has_latency else 4
+    fig, axes = plt.subplots(n_panels, 1, figsize=(11, 3 * n_panels), sharex=True)
 
     axes[0].plot(data["t"], data["d_a"], color="tab:blue", label="A displacement (slave)")
     axes[0].plot(data["t"], data["d_b"], color="tab:orange", label="B displacement (master)")
@@ -545,6 +575,19 @@ def plot_teleop_log(csv_path, out_path=None):
                      alpha=0.4, linewidth=0.6)
     axes[2].plot(data["t"], data["iq_a_filt"], color="navy", label="iq A filt",
                  linewidth=1.0)
+    # Hand-torque observer, when the log has it: tau_h is the estimated hand
+    # torque on Motor B (in amps of equivalent current) and iq_a_ff is the
+    # feedforward current it produced. If iq_a_ff ever opposes the direction of
+    # the push, FF_GAIN has the wrong sign -- that is what this shows.
+    if any(v is not None for v in data["tau_h"]):
+        t_th = [t for t, v in zip(data["t"], data["tau_h"]) if v is not None]
+        v_th = [v for v in data["tau_h"] if v is not None]
+        axes[2].plot(t_th, v_th, color="tab:green", label="tau_h (est. hand)",
+                     linewidth=1.0, alpha=0.8)
+        t_ff = [t for t, v in zip(data["t"], data["iq_a_ff"]) if v is not None]
+        v_ff = [v for v in data["iq_a_ff"] if v is not None]
+        axes[2].plot(t_ff, v_ff, color="tab:olive", label="iq A feedforward",
+                     linewidth=1.0, linestyle="--")
     axes[2].set_ylabel("Motor A\nCurrent (A)")
     axes[2].legend(loc="upper right", fontsize=8)
 
@@ -556,8 +599,48 @@ def plot_teleop_log(csv_path, out_path=None):
         axes[3].plot(t_bct, v_bct, color="tab:red", label="iq B readback",
                      alpha=0.5, linewidth=0.7)
     axes[3].set_ylabel("Motor B\nCurrent (A)")
-    axes[3].set_xlabel("Time (s)")
     axes[3].legend(loc="upper right", fontsize=8)
+
+    if has_latency:
+        for key, color, label in (
+            ("enc_age_a", "tab:blue", "enc age A"),
+            ("enc_age_b", "tab:orange", "enc age B"),
+            ("iq_age_a", "tab:cyan", "iq age A"),
+            ("enc_lag_a", "tab:red", "RX handling lag A"),
+            ("enc_lag_b", "tab:purple", "RX handling lag B"),
+            ("loop_dt", "gray", "loop dt"),
+        ):
+            t_v = [t for t, v in zip(data["t"], data[key]) if v is not None]
+            v_v = [1000.0 * v for v in data[key] if v is not None]
+            if t_v:
+                axes[4].plot(t_v, v_v, color=color, label=label, linewidth=0.8)
+        axes[4].set_ylabel("Telemetry age /\nloop period (ms)")
+        axes[4].legend(loc="upper left", fontsize=8)
+
+        # Fresh-sample fraction on a twin axis: rolling mean of fresh_a over
+        # ~0.5 s. 1.0 means every iteration got a new encoder sample; 0.6
+        # means 40% of the loop's torque commands were computed from a
+        # position it had already used.
+        fresh = [v for v in data["fresh_a"] if v is not None]
+        if fresh:
+            t_fresh = [t for t, v in zip(data["t"], data["fresh_a"]) if v is not None]
+            dt_med = (t_fresh[-1] - t_fresh[0]) / max(1, len(t_fresh) - 1)
+            win = max(1, int(round(0.5 / dt_med)) if dt_med > 0 else 1)
+            roll = []
+            run_sum = 0.0
+            for i, v in enumerate(fresh):
+                run_sum += v
+                if i >= win:
+                    run_sum -= fresh[i - win]
+                roll.append(run_sum / min(i + 1, win))
+            ax_fresh = axes[4].twinx()
+            ax_fresh.plot(t_fresh, roll, color="tab:green", linewidth=1.0,
+                          label="fresh enc A (0.5s mean)")
+            ax_fresh.set_ylabel("Fresh sample\nfraction")
+            ax_fresh.set_ylim(0, 1.05)
+            ax_fresh.legend(loc="lower right", fontsize=8)
+
+    axes[-1].set_xlabel("Time (s)")
 
     plt.tight_layout()
 
