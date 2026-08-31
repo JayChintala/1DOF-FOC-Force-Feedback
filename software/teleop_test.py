@@ -1,33 +1,56 @@
 """
-Teleop test -- position-driven slave with current-based force reflection.
+Teleop test -- velocity-driven slave with current-based force reflection.
 
-Motor B (ESC 2) is the CONTROLLER: it's spun by hand and drives nothing
-on its own. Motor A (ESC 1) is the ROBOT: it moves ONLY in response to
-Motor B's position changing, via a one-directional position PD (same
-math as position_mirror_test.py, but only applied to A -- B never gets a
-torque command derived from position error).
+Motor B (ESC 2) is the CONTROLLER: it's spun by hand and drives nothing on its own. 
+Motor A (ESC 1) is the ROBOT: it tries to match Motor B's VELOCITY (not position).
 
-Channel 1 -- position drives the slave (A tracks B):
-    err  = (pos_B - base_B) - (pos_A - base_A)
-    derr = vel_B - vel_A
-    iq_a_cmd = clamp(KP*err + KD*derr, -IQ1_MAX_A, IQ1_MAX_A)
+Channel 1 -- velocity drives the slave (A tracks B's speed):
+    verr = vel_B - vel_A
+    iq_a_cmd = IQ1_MAX_A * tanh(KV_SLOPE * verr / IQ1_MAX_A)
+
+
+tanh (rather than a plain linear KV*verr) gives a steep initial ramp for
+small verr -- most use is at low speed, and a linear gain strong enough
+to feel immediate at low speed turned out to be strong enough everywhere
+to cause a sustained oscillation (see KV_SLOPE comment below). tanh's
+slope naturally decreases as it approaches the IQ1_MAX_A ceiling instead
+of ramping linearly into a hard clip, which both gives quick low-speed
+response and reduces gain right where the previous oscillation lived.
+
+A never corrects any position offset accumulated while blocked -- once free
+again it matches B's speed going forward but does not catch back up to
+B's absolute position. 
 
 Channel 2 -- Motor A's actual sensed current is reflected onto Motor B,
 so whatever resistance the robot (A) is fighting gets felt on the
-controller (B):
+controller (B), plus a damping term on B's own velocity:
     iq_a_filt = EMA(iq_a_readback)
-    iq_b_cmd  = clamp(FEEDBACK_GAIN * iq_a_filt, -IQ2_MAX_A, IQ2_MAX_A)
+    iq_b_cmd  = clamp(FEEDBACK_GAIN * iq_a_filt - KB_DAMP * vel_b_filt,
+                       -IQ2_MAX_A, IQ2_MAX_A)
 
-Unlike torque_mirror_test.py's bidirectional current mirror, these two
-channels are independent and one-directional -- Motor B never receives
-anything derived from its own state, so there's no closed-loop
-common-mode drift to worry about. There's also no need for an artificial
-bias current on either motor: Motor A's Iq command is never idle-zero by
-design (it's whatever the position PD computes), so IQ_READBACK on A is
-meaningful without one, and there's no startup lurch.
+CORRECTION: these two channels are NOT actually independent once you
+account for the physical hardware, only in the software's data-flow.
+verr (which drives Channel 1) depends on vel_b; Channel 1's output drives
+Channel 2's input (iq_a_filt); Channel 2's output physically spins Motor
+B, which changes vel_b right back -- a genuine closed loop through the
+hardware, with no term anywhere damping B's OWN velocity independent of
+what A is doing. Confirmed on the bench: holding B tightly (but not with
+literally infinite rigidity) still oscillated once slightly disturbed --
+a sustained ~5Hz ring with vel_a/vel_b swinging tens of thousands of
+counts/s, i.e. feedback howl through the A<->B loop, not local noise/lag
+in Channel 1 alone. KB_DAMP adds real damping directly on the part of the
+loop that had none, without touching the steady-state resistance you
+feel from a sustained push (that still comes entirely from
+FEEDBACK_GAIN * iq_a_filt).
+
+There's no need for an artificial bias current on either motor: Motor
+A's Iq command is never idle-zero by design (it's whatever the velocity
+controller computes), so IQ_READBACK on A is meaningful without one, and
+there's no startup lurch.
 """
 
 import csv
+import math
 import os
 import sys
 import time
@@ -39,46 +62,75 @@ from plot_run import plot_teleop_log
 NODE_BASE_A = 0x000    # Motor A -- the "robot" (slave, position-tracking)
 NODE_BASE_B = 0x020    # Motor B -- the "controller" (master, hand-driven)
 
-# ---- Channel 1: position -> Motor A ----
-# Starting point carried over from position_mirror_test.py's stable gains.
-KP = 0.000265           # A/count of relative position error
-KD = 0.00001            # A/(count/s) of relative velocity
-IQ1_MAX_A = 0.8         # hard clamp on Motor A's commanded current
+# ---- Channel 1: velocity -> Motor A ----
+# tanh(x) has slope exactly 1 at x=0 -- near verr=0, tanh(KV_SLOPE*verr/..)
+# behaves EXACTLY like a linear gain of KV_SLOPE. Setting KV_SLOPE=0.0001
+# (2.5x the already-unstable 0.00004) reintroduced the same oscillation:
+# tanh's saturation only reduces gain far from zero, it does nothing for
+# the small/moderate-verr instability, which is a delay-induced limit
+# cycle governed by the LOCAL gain at the operating point, not the
+# asymptote. So KV_SLOPE alone can't both be strong at low speed and
+# stable -- IQ_A_CMD_FILTER_ALPHA below is the actual stability fix.
+KV_SLOPE = 0.0001        # A/(count/s), initial slope near verr=0
+IQ1_MAX_A = 1.0          # hard clamp/asymptote on Motor A's commanded
+                         # current -- the "door's" max resistance. Raised
+                         # from 0.8 -- observed peak usage was only ~0.6A,
+                         # so 0.8 wasn't actually the binding ceiling yet.
 
-# EMA: vel_filt = ALPHA*vel_raw + (1-ALPHA)*vel_filt_prev. 0.25 matches
-# position_hold_test.py rather than position_mirror_test.py's 0.5 -- Motor
-# A is the sole actuator here (like position_hold's single free motor),
-# not sharing the correction with a second motor, so it's more exposed to
-# velocity-estimate noise feeding the KD term and benefits from heavier
-# smoothing.
+# Low-pass filter on the OUTPUT command (iq_a_cmd), not the velocity
+# input -- this is the actual fix for the oscillation. Filtering vel_a/
+# vel_b only delays the sensing side and doesn't touch the actuation
+# path; filtering the command directly damps fast swings (the observed
+# oscillation was ~30-50Hz) while barely affecting the steady-state
+# value for a sustained push, since low frequencies pass through
+# essentially unattenuated. Lowered from 0.3 -- oscillation persisted
+# ("a lot") at 0.3, so pushing more smoothing/lag onto the command.
+IQ_A_CMD_FILTER_ALPHA = 0.12
+
+# EMA: vel_filt = ALPHA*vel_raw + (1-ALPHA)*vel_filt_prev.
 VEL_FILTER_ALPHA = 0.25
 
-WATCHDOG_VEL_LIMIT_CNT_S = 200_000.0   # counts/s, either shaft
-WATCHDOG_ERROR_LIMIT_CNT = 40000.0     # counts of relative error
+WATCHDOG_VEL_LIMIT_CNT_S = 200_000.0   # counts/s, either shaft -- genuine
+                                        # runaway-speed protection. No
+                                        # position-error watchdog: with a
+                                        # pure velocity controller, a large
+                                        # position gap while A is blocked
+                                        # is the expected steady state, not
+                                        # a fault.
 
 # sign_check_test.py - Increasing Iq = 1, Decreasing Iq = -1
 SIGN = 1
 
 # ---- Channel 2: Motor A's current -> Motor B ----
-# NEGATIVE by design: iq_a_cmd points in the direction that would reduce
 # err (pull A toward B) -- feeding that same sign to B pushes B further
 # AWAY from A (positive feedback/runaway, confirmed on the bench: holding
 # A and spinning B kept accelerating B in the same direction instead of
 # resisting). Negating it makes B get pulled back toward A's actual
 # position instead, which is the correct restoring/resistance feel.
 FEEDBACK_GAIN = -1.0    # A/A -- how much of A's sensed current is felt on B
-IQ2_MAX_A = 0.3         # hard clamp on Motor B's commanded current (hand-held)
-IQ_FILTER_ALPHA = 0.15  # EMA low-pass on Motor A's IQ_READBACK before mirroring
+IQ2_MAX_A = IQ1_MAX_A   # match Motor A's ceiling -- the point of Channel 2 is
+                         # to feel exactly what A feels, so there's no reason
+                         # for B's clamp to be lower than A's. (Was capped
+                         # lower, 0.3 then 0.7, purely as an extra caution
+                         # while validating this on the bench -- not because
+                         # the hardware itself differs between the two motors.)
+IQ_FILTER_ALPHA = 0.08  # EMA low-pass on Motor A's IQ_READBACK before mirroring --
+                         # lowered from 0.15, reported jittery/inconsistent on the
+                         # bench; heavier smoothing trades a bit more lag for a
+                         # steadier felt resistance.
 
-# ---- Shared ----
-# 200 Hz matches the exact rate position_hold_test.py validated KP/KD at
-# for a single free motor. position_mirror_test.py runs its (same) gains
-# at 750 Hz, but that works there because both motors share the position
-# correction; here Motor A alone must correct 100% of any error, so it's
-# more exposed to loop-timing jitter and velocity-estimate noise. Console
-# print() every iteration was blowing the achieved rate out to ~240 Hz
-# with dt spikes up to 13.7ms (vs. a 1.33ms target at 750 Hz) -- see
-# PRINT_EVERY_S below.
+# Damping on Motor B's OWN velocity, independent of Channel 1 -- the
+# actual fix for the ~5Hz, huge-amplitude oscillation, which turned out
+# to be a closed loop through the physical hardware (vel_b -> Channel 1
+# -> iq_a -> Channel 2 -> iq_b -> physically spins B -> vel_b), not a
+# Channel-1-only problem. Nothing upstream of this damped B's own motion.
+# Sized so it's small relative to a normal push (a few thousand counts/s)
+# but substantial at the oscillation's observed amplitude (tens of
+# thousands of counts/s) -- tune this first if oscillation persists or if
+# it now feels like B is dragging during a normal push.
+KB_DAMP = 0.00002       # A/(count/s) of Motor B's own filtered velocity
+
+
 CONTROL_RATE_HZ = 200
 STALE_TIMEOUT_S = 0.05  # telemetry older than this -> fail safe
 STALE_WARN_EVERY_S = 1.0
@@ -95,7 +147,7 @@ def clamp(value, lo, hi=None):
 
 def main():
     os.makedirs(LOG_DIR, exist_ok=True)
-    base_name = f"teleop_KP{KP:g}_KD{KD:g}_FB{FEEDBACK_GAIN:g}"
+    base_name = f"teleop_KVs{KV_SLOPE:g}_FB{FEEDBACK_GAIN:g}"
     log_path = os.path.join(LOG_DIR, f"{base_name}.csv")
     suffix = 2
     while os.path.exists(log_path):
@@ -135,8 +187,9 @@ def main():
         base_a = ta0["enc_count_unwrapped"]
         base_b = tb0["enc_count_unwrapped"]
         print(f"Baselines: A={base_a:.0f}  B={base_b:.0f} counts")
-        print(f"Channel 1 (position->A): KP={KP} KD={KD} IQ1_MAX={IQ1_MAX_A}A SIGN={SIGN}")
-        print(f"Channel 2 (A current->B): FEEDBACK_GAIN={FEEDBACK_GAIN} IQ2_MAX={IQ2_MAX_A}A")
+        print(f"Channel 1 (velocity->A): KV_SLOPE={KV_SLOPE} IQ1_MAX={IQ1_MAX_A}A SIGN={SIGN}")
+        print(f"Channel 2 (A current->B): FEEDBACK_GAIN={FEEDBACK_GAIN} "
+              f"KB_DAMP={KB_DAMP} IQ2_MAX={IQ2_MAX_A}A")
         print(f"Logging to {log_path}")
         print("Spin B; A should follow. Hold A; feel resistance in B. Ctrl+C to stop.\n")
 
@@ -148,6 +201,7 @@ def main():
         vel_a_filt = 0.0
         vel_b_filt = 0.0
         iq_a_filt = 0.0
+        iq_a_cmd_filt = 0.0
         last_stale_warn = 0.0
         last_print = 0.0
         watchdog_tripped = False
@@ -197,25 +251,30 @@ def main():
 
             d_a = pos_a - base_a
             d_b = pos_b - base_b
-            err = d_b - d_a
-            derr = vel_b_filt - vel_a_filt
+            err = d_b - d_a       # logged for visibility only -- not used for control
+            verr = vel_b_filt - vel_a_filt
 
-            # Watchdog -- before computing/sending torque.
-            if (abs(err) > WATCHDOG_ERROR_LIMIT_CNT
-                    or abs(vel_a_filt) > WATCHDOG_VEL_LIMIT_CNT_S
+            # Watchdog -- before computing/sending torque. Position error
+            # (err) is NOT checked here: with a pure velocity controller, a
+            # large/growing gap while A is blocked is the expected steady
+            # state (the whole point of the door model), not a fault.
+            if (abs(vel_a_filt) > WATCHDOG_VEL_LIMIT_CNT_S
                     or abs(vel_b_filt) > WATCHDOG_VEL_LIMIT_CNT_S):
                 print(
-                    f"\nWATCHDOG TRIPPED: err={err:.0f} cnt, "
-                    f"vel_a={vel_a_filt:.0f}, vel_b={vel_b_filt:.0f} cnt/s. "
-                    f"Zeroing both and aborting.\n"
-                    f"(If err grew monotonically from the start, flip SIGN.)"
+                    f"\nWATCHDOG TRIPPED: vel_a={vel_a_filt:.0f}, "
+                    f"vel_b={vel_b_filt:.0f} cnt/s. Zeroing both and aborting."
                 )
                 watchdog_tripped = True
                 break
 
-            # Channel 1: position -> Motor A.
-            coupling = KP * err + KD * derr
-            iq_a_cmd = clamp(SIGN * coupling, IQ1_MAX_A)
+            # Channel 1: velocity -> Motor A (tanh saturation, see module
+            # docstring/KV_SLOPE comment), then low-pass the OUTPUT command
+            # itself -- the actual oscillation fix, see IQ_A_CMD_FILTER_ALPHA
+            # comment above.
+            iq_a_cmd_raw = IQ1_MAX_A * math.tanh(SIGN * KV_SLOPE * verr / IQ1_MAX_A)
+            iq_a_cmd_filt = (IQ_A_CMD_FILTER_ALPHA * iq_a_cmd_raw
+                              + (1 - IQ_A_CMD_FILTER_ALPHA) * iq_a_cmd_filt)
+            iq_a_cmd = iq_a_cmd_filt
             a.send_set_iq(iq_a_cmd)
 
             # Channel 2: Motor A's sensed current -> Motor B.
@@ -224,10 +283,10 @@ def main():
                 or (now_wall - iq_a_time) > STALE_TIMEOUT_S
             )
             if iq_a_stale:
-                iq_b_cmd = 0.0
+                iq_b_cmd = clamp(-KB_DAMP * vel_b_filt, IQ2_MAX_A)
             else:
                 iq_a_filt = IQ_FILTER_ALPHA * iq_a + (1 - IQ_FILTER_ALPHA) * iq_a_filt
-                iq_b_cmd = clamp(FEEDBACK_GAIN * iq_a_filt, IQ2_MAX_A)
+                iq_b_cmd = clamp(FEEDBACK_GAIN * iq_a_filt - KB_DAMP * vel_b_filt, IQ2_MAX_A)
             b.send_set_iq(iq_b_cmd)
 
             t_rel = now - start_time
