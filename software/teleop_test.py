@@ -4,18 +4,31 @@ Teleop test -- velocity-driven slave with current-based force reflection.
 Motor B (ESC 2) is the CONTROLLER: it's spun by hand and drives nothing on its own. 
 Motor A (ESC 1) is the ROBOT: it tries to match Motor B's VELOCITY (not position).
 
-Channel 1 -- velocity drives the slave (A tracks B's speed):
-    verr = vel_B - vel_A
-    iq_a_cmd = IQ1_MAX_A * tanh(KV_SLOPE * verr / IQ1_MAX_A)
+Channel 1 -- velocity drives the slave (A tracks B's speed), PD on
+velocity error:
+    verr      = vel_B - vel_A
+    accel_err = d(verr)/dt, EMA-filtered
+    iq_a_cmd  = clamp(IQ1_MAX_A*tanh(KV_SLOPE*verr/IQ1_MAX_A) + KD_SLOPE*accel_err,
+                       -IQ1_MAX_A, IQ1_MAX_A)
 
+The plant here (current -> torque -> acceleration -> velocity) is
+essentially an integrator. A pure-proportional (P-only) controller closed
+around an integrator plant WILL ring once gain*loop-delay crosses a
+threshold -- that's what every oscillation so far has actually been
+(confirmed: vel_a rang 2.4-7x harder than vel_b regardless of B-side
+damping, i.e. Motor A oscillating on its own, chasing zero velocity).
+Every fix before this one (output filtering, velocity filtering) was
+trying to patch that with low-pass filters, which remove high-frequency
+content but don't add phase margin the way real derivative action does.
+KD_SLOPE adds a term that opposes the RATE of change of the velocity
+error specifically -- it engages hard during a fast oscillatory swing and
+barely at all during a slow, steady push, which is what lets KV_SLOPE be
+raised again without reintroducing the ring.
 
-tanh (rather than a plain linear KV*verr) gives a steep initial ramp for
-small verr -- most use is at low speed, and a linear gain strong enough
-to feel immediate at low speed turned out to be strong enough everywhere
-to cause a sustained oscillation (see KV_SLOPE comment below). tanh's
-slope naturally decreases as it approaches the IQ1_MAX_A ceiling instead
-of ramping linearly into a hard clip, which both gives quick low-speed
-response and reduces gain right where the previous oscillation lived.
+tanh (rather than a plain linear KV*verr on the P term) still gives a
+steep initial ramp for small verr -- most use is at low speed -- while
+its slope naturally decreases toward the IQ1_MAX_A ceiling instead of
+ramping linearly into a hard clip.
 
 A never corrects any position offset accumulated while blocked -- once free
 again it matches B's speed going forward but does not catch back up to
@@ -62,29 +75,56 @@ from plot_run import plot_teleop_log
 NODE_BASE_A = 0x000    # Motor A -- the "robot" (slave, position-tracking)
 NODE_BASE_B = 0x020    # Motor B -- the "controller" (master, hand-driven)
 
-# ---- Channel 1: velocity -> Motor A ----
-# tanh(x) has slope exactly 1 at x=0 -- near verr=0, tanh(KV_SLOPE*verr/..)
-# behaves EXACTLY like a linear gain of KV_SLOPE. Setting KV_SLOPE=0.0001
-# (2.5x the already-unstable 0.00004) reintroduced the same oscillation:
-# tanh's saturation only reduces gain far from zero, it does nothing for
-# the small/moderate-verr instability, which is a delay-induced limit
-# cycle governed by the LOCAL gain at the operating point, not the
-# asymptote. So KV_SLOPE alone can't both be strong at low speed and
-# stable -- IQ_A_CMD_FILTER_ALPHA below is the actual stability fix.
-KV_SLOPE = 0.0001        # A/(count/s), initial slope near verr=0
+# ---- Channel 1: velocity -> Motor A (PD on velocity error) ----
+# History: KV_SLOPE=0.0001 (P-only) rang badly. Adding a D term made it
+# WORSE (KD_SLOPE=0.000005 + KV_SLOPE=0.00001 hit 198k cnt/s peak, the
+# worst yet) -- accel_err_filt is a numerical double-derivative of
+# position, which amplifies encoder/timing noise by roughly 1/dt^2;
+# confirmed by zeroing KD_SLOPE at the same KV_SLOPE=0.00001, which
+# passed the let-go-completely test with NO oscillation (but very weak
+# feedback, as expected -- 0.00001 is the original "too weak" baseline).
+# D term stays at 0 until it can be redone with a properly (heavily)
+# filtered acceleration estimate rather than raw double-differencing.
+# Now raising KV_SLOPE in SMALL increments from the confirmed-stable
+# 0.00001, re-testing (disturb B, let go of both motors) at each step --
+# 0.000018 is the pre-tanh value that was stable before any of this
+# tuning started, a reasonable next step rather than jumping further.
+KV_SLOPE = 0.000018      # A/(count/s), initial P-term slope near verr=0
 IQ1_MAX_A = 1.0          # hard clamp/asymptote on Motor A's commanded
                          # current -- the "door's" max resistance. Raised
                          # from 0.8 -- observed peak usage was only ~0.6A,
                          # so 0.8 wasn't actually the binding ceiling yet.
+                         # NOTE: current oscillation is also very likely
+                         # why peak commands cap around 0.6A rather than
+                         # reaching this ceiling -- the output filter
+                         # below never lets a rapidly-reversing raw signal
+                         # settle at an extreme. Expect this to resolve on
+                         # its own once the ring is actually gone; revisit
+                         # separately only if it's still capped after that.
 
-# Low-pass filter on the OUTPUT command (iq_a_cmd), not the velocity
-# input -- this is the actual fix for the oscillation. Filtering vel_a/
-# vel_b only delays the sensing side and doesn't touch the actuation
-# path; filtering the command directly damps fast swings (the observed
-# oscillation was ~30-50Hz) while barely affecting the steady-state
-# value for a sustained push, since low frequencies pass through
-# essentially unattenuated. Lowered from 0.3 -- oscillation persisted
-# ("a lot") at 0.3, so pushing more smoothing/lag onto the command.
+# D term: opposes the RATE OF CHANGE of the velocity error (relative
+# acceleration), not the error itself. Raised 10x from 0.0000005 -- that
+# value was too small to have any visible braking effect against the
+# accelerations actually seen during the ring (tens of thousands of
+# counts/s^2). ACCEL_FILTER_ALPHA smooths the (noisy, double-differenced)
+# acceleration estimate before use. Both remain unvalidated -- tune
+# KD_SLOPE first if oscillation persists (higher damps harder) or if the
+# feel goes mushy/laggy (lower).
+KD_SLOPE = 0.0             # A/(count/s^2) of relative acceleration -- TEMPORARILY
+                            # zeroed as a diagnostic: last run (KD_SLOPE=0.000005)
+                            # got WORSE (peak vel_a 198k cnt/s, worst yet) even
+                            # though KV_SLOPE was cut to its most conservative
+                            # value. accel_err_filt is a numerical double-
+                            # derivative of position, which amplifies encoder/
+                            # timing noise by roughly 1/dt^2 -- suspect the D
+                            # term is injecting noise-driven commands rather
+                            # than damping. Zeroing it isolates whether D is the
+                            # problem before touching anything else.
+ACCEL_FILTER_ALPHA = 0.15
+
+# Low-pass filter on the OUTPUT command (iq_a_cmd), on top of the PD
+# terms above -- kept as a secondary smoothing stage, not the primary
+# stability mechanism now that KD_SLOPE provides real derivative action.
 IQ_A_CMD_FILTER_ALPHA = 0.12
 
 # EMA: vel_filt = ALPHA*vel_raw + (1-ALPHA)*vel_filt_prev.
@@ -187,7 +227,8 @@ def main():
         base_a = ta0["enc_count_unwrapped"]
         base_b = tb0["enc_count_unwrapped"]
         print(f"Baselines: A={base_a:.0f}  B={base_b:.0f} counts")
-        print(f"Channel 1 (velocity->A): KV_SLOPE={KV_SLOPE} IQ1_MAX={IQ1_MAX_A}A SIGN={SIGN}")
+        print(f"Channel 1 (velocity->A): KV_SLOPE={KV_SLOPE} KD_SLOPE={KD_SLOPE} "
+              f"IQ1_MAX={IQ1_MAX_A}A SIGN={SIGN}")
         print(f"Channel 2 (A current->B): FEEDBACK_GAIN={FEEDBACK_GAIN} "
               f"KB_DAMP={KB_DAMP} IQ2_MAX={IQ2_MAX_A}A")
         print(f"Logging to {log_path}")
@@ -202,6 +243,8 @@ def main():
         vel_b_filt = 0.0
         iq_a_filt = 0.0
         iq_a_cmd_filt = 0.0
+        prev_verr = 0.0
+        accel_err_filt = 0.0
         last_stale_warn = 0.0
         last_print = 0.0
         watchdog_tripped = False
@@ -254,6 +297,16 @@ def main():
             err = d_b - d_a       # logged for visibility only -- not used for control
             verr = vel_b_filt - vel_a_filt
 
+            # D term: rate of change of verr (relative acceleration),
+            # filtered -- see KD_SLOPE/ACCEL_FILTER_ALPHA comment above.
+            if elapsed < 0.5 * dt:
+                accel_err_raw = 0.0
+            else:
+                accel_err_raw = (verr - prev_verr) / elapsed
+            accel_err_filt = (ACCEL_FILTER_ALPHA * accel_err_raw
+                               + (1 - ACCEL_FILTER_ALPHA) * accel_err_filt)
+            prev_verr = verr
+
             # Watchdog -- before computing/sending torque. Position error
             # (err) is NOT checked here: with a pure velocity controller, a
             # large/growing gap while A is blocked is the expected steady
@@ -267,11 +320,13 @@ def main():
                 watchdog_tripped = True
                 break
 
-            # Channel 1: velocity -> Motor A (tanh saturation, see module
-            # docstring/KV_SLOPE comment), then low-pass the OUTPUT command
-            # itself -- the actual oscillation fix, see IQ_A_CMD_FILTER_ALPHA
-            # comment above.
-            iq_a_cmd_raw = IQ1_MAX_A * math.tanh(SIGN * KV_SLOPE * verr / IQ1_MAX_A)
+            # Channel 1: PD on velocity error -- P (tanh saturation) plus D
+            # (opposes the rate of change of verr, see KD_SLOPE comment),
+            # then low-pass the combined OUTPUT command as a secondary
+            # smoothing stage.
+            iq_a_p = IQ1_MAX_A * math.tanh(SIGN * KV_SLOPE * verr / IQ1_MAX_A)
+            iq_a_d = SIGN * KD_SLOPE * accel_err_filt
+            iq_a_cmd_raw = clamp(iq_a_p + iq_a_d, IQ1_MAX_A)
             iq_a_cmd_filt = (IQ_A_CMD_FILTER_ALPHA * iq_a_cmd_raw
                               + (1 - IQ_A_CMD_FILTER_ALPHA) * iq_a_cmd_filt)
             iq_a_cmd = iq_a_cmd_filt
