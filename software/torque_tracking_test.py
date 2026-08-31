@@ -75,25 +75,12 @@ from collections import deque
 
 from can_interface import MotorCANInterface, ENC_PULSE_NBR
 
-# ---- Which motor to test ----
-# ESC 1: CAN_NODE_ID = 0 -> node_base = 0x000
-# ESC 2: CAN_NODE_ID = 1 -> node_base = 0x020
+# ---- Which motor to test ----\
 MOTOR_NODE_BASE = 0x020
 
 CONTROL_RATE_HZ = 200.0
 
 # ---- Step sequence ----
-# Small, symmetric steps in both directions, each followed by a 0A dwell
-# so the shaft has a chance to shed momentum before the next nonzero
-# step -- see SAFETY above for why this replaced a monotonic staircase.
-#
-# Includes a +-0.8A step (matching position_hold_test.py's IQ_MAX_A, the
-# highest current run on this hardware to date) to check tracking at a
-# force level actually useful for haptics -- 0.05-0.15A confirmed
-# accurate tracking but is too weak to be felt as meaningful resistance.
-# 0.8A is >5x the 0.15A level that free-spun a motor ~20 rev/s
-# (sign_check_test.py), so this step MUST be run with the shaft actively
-# held/resisted by hand -- do not run this step on a free shaft.
 STEP_LEVELS_A = [0.0, 0.05, 0.0, 0.10, 0.0, 0.15, 0.0, 0.40, 0.0,
                  -0.05, 0.0, -0.10, 0.0, -0.15, 0.0, -0.60, 0.0]
 STEP_DURATION_S = 0.4

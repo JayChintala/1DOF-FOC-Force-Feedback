@@ -20,21 +20,6 @@ noise around zero on a zero-commanded (free) motor. Torque is still 100%
 FOC-generated; the force simply emerges from the position coupling rather
 than from an explicit current measurement.
 
-Baselines are captured at startup, so the shafts couple from wherever they
-currently sit -- neither jerks to match the other's absolute encoder count.
-
-SAFETY:
-  - Both motors are ACTIVELY DRIVEN here (unlike the old force_mirror
-    where one was left free). Mechanically secure both before running.
-  - IQ_MAX_A hard-clamps every command to each motor.
-  - Runaway watchdog: if |err| or either |vel| exceeds a hard limit,
-    both torques are zeroed and the run aborts. A WRONG global SIGN turns
-    the coupling into a repeller (motors fly apart) -- that shows up as an
-    immediate watchdog trip with err growing monotonically. If that
-    happens, flip SIGN to -1 and rerun.
-  - Telemetry staleness watchdog: if either motor's ENC_COUNT goes stale,
-    both torques are zeroed until fresh data returns.
-  - Ctrl+C zeros and stops both motors.
 
 Every run writes a timestamped-name CSV to ./logs/ and, on exit, renders a
 4-panel PNG next to it via plot_run.plot_position_mirror_log(), so you can
@@ -43,8 +28,6 @@ inspect the coupling afterward instead of reading the scrolling console.
 Run from software/ with the venv active:
     python3 position_mirror_test.py
 
-Re-plot an existing log without re-running the motors:
-    python3 plot_run.py logs/position_mirror_KP0.00026_KD1e-05_A0.8.csv
 """
 
 import csv
@@ -67,13 +50,12 @@ KD = 0.00001           # A/(count/s) of relative velocity
 IQ_MAX_A = 0.8         # hard per-motor clamp (below position_hold's 0.8 for
                        # a first position-mirror bring-up -- raise once it feels safe)
 
-CONTROL_RATE_HZ = 5
-00.0
+CONTROL_RATE_HZ =750
 RUN_DURATION_S = 10.0
 
 # ---- Velocity filter (per shaft) ----
 # EMA: vel_filt = ALPHA*vel_raw + (1-ALPHA)*vel_filt_prev. 1.0 disables.
-VEL_FILTER_ALPHA = 0.25
+VEL_FILTER_ALPHA = 0.5
 
 # ---- Watchdogs ----
 WATCHDOG_VEL_LIMIT_CNT_S = 200_000.0   # counts/s, per shaft

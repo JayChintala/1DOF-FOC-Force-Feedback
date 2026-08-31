@@ -26,10 +26,6 @@ WHAT TO WATCH FOR:
   - If |Iq| rises meaningfully and proportionally to how hard you push,
     the premise holds and the mirror problem is elsewhere.
 
-SAFETY: only ever commands Iq = 0, so Motor 1 is never actively driven.
-On a near-frictionless shaft it may still coast after you spin it by hand.
-Ctrl+C zeroes torque and stops.
-
 Run from software/ with the venv active:
     python3 iq_readback_probe.py
 """
