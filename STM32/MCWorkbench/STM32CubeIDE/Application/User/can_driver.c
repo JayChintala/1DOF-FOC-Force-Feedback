@@ -30,17 +30,17 @@ static volatile CAN_CmdState_t s_cmd = {0};
  * corresponding telemetry message (e.g. hardware Tx FIFO still full because
  * this node keeps losing arbitration to a lower-ID node on the bus).
  *
- * These matter more than they used to: FLASH 1 widens IQ_READBACK to 8 bytes
- * and adds an IQ_MEAN frame, pushing bus load up by roughly a fifth. If the
- * conditioned traces look gappy, read these before blaming the filter. */
+ * NOT wired into the MC register interface, so nothing reads them at runtime
+ * -- which is why the ENC_COUNT overflow described in CAN_SendTelemetry()
+ * went unnoticed. Read them over SWD, or follow the MC_REG_SECTOR pattern in
+ * sync_registers.c to expose them. There is no separate angle counter: the
+ * electrical angle rides in the IQ_MEAN frame. */
 static volatile uint32_t s_iqTxDropCount = 0;
 static volatile uint32_t s_iqMeanTxDropCount = 0;
-static volatile uint32_t s_angleTxDropCount = 0;
 static volatile uint32_t s_encTxDropCount = 0;
 
 uint32_t CAN_GetIqTxDropCount(void) { return s_iqTxDropCount; }
 uint32_t CAN_GetIqMeanTxDropCount(void) { return s_iqMeanTxDropCount; }
-uint32_t CAN_GetAngleTxDropCount(void) { return s_angleTxDropCount; }
 uint32_t CAN_GetEncTxDropCount(void) { return s_encTxDropCount; }
 
 void CAN_Driver_Init(FDCAN_HandleTypeDef* hfdcan) {
@@ -167,10 +167,30 @@ void CAN_SendTelemetry(void) {
   float const iqEwma = IqTelem_GetEwma() * iqScale;
   float const iqMean = IqTelem_GetMeanAndReset() * iqScale;
 
-  /* IQ_READBACK carries the untouched raw sample in bytes 0..3, exactly as
-   * before, and the EWMA in bytes 4..7. Widening the frame is backward
-   * compatible: can_interface.py matches on len(data) >= 4 and slices [:4],
-   * so existing consumers keep reading the raw value and are unaffected. */
+  /* HARD LIMIT: exactly three frames may be queued here, no more.
+   *
+   * The STM32G4 FDCAN message RAM has a fixed layout and SRAMCAN_TFQ_NBR is
+   * hardcoded to 3 (stm32g4xx_hal_fdcan.c) -- three Tx elements, not
+   * configurable. An element stays occupied until its frame has finished on
+   * the wire, and an 8-byte standard frame at 1 Mbit/s takes ~115 us while
+   * queuing all of them takes a few us. So a fourth offer always arrives
+   * with TFQF still set and HAL_FDCAN_AddMessageToTxFifoQ returns HAL_ERROR
+   * immediately (see its TFQF check). The fourth frame is not delayed, it is
+   * dropped, every single 1 kHz cycle.
+   *
+   * That is exactly what a previous version of this function did: it queued
+   * IQ_READBACK, IQ_MEAN, ELEC_ANGLE, ENC_COUNT and silently lost ENC_COUNT
+   * on every cycle, taking position feedback on the Pi with it. Adding a
+   * fourth frame was what tipped it over -- the original three fit exactly.
+   *
+   * ELEC_ANGLE is therefore folded into the IQ_MEAN frame rather than being
+   * sent separately: it is only 2 bytes, and IQ_MEAN had 4 spare. The
+   * standalone 0x013 ID is retired. If you ever need another signal, pack it
+   * into the spare bytes below -- do not add a frame. */
+
+  /* Bytes 0..3 raw (untouched, as before), 4..7 EWMA. Widening this frame is
+   * backward compatible: can_interface.py matches on len(data) >= 4 and
+   * slices [:4], so a consumer that only wants the raw value is unaffected. */
   uint8_t iqPayload[8];
   memcpy(&iqPayload[0], &iqd.q, sizeof(float));
   memcpy(&iqPayload[4], &iqEwma, sizeof(float));
@@ -181,20 +201,20 @@ void CAN_SendTelemetry(void) {
     s_iqTxDropCount++;
   }
 
+  /* Bytes 0..3 boxcar mean, 4..5 electrical angle (DPP). 2 bytes spare. */
+  uint8_t meanPayload[6];
+  memcpy(&meanPayload[0], &iqMean, sizeof(float));
+  memcpy(&meanPayload[4], &elAngle, sizeof(int16_t));
+
   hdr.Identifier = CAN_ID_IQ_MEAN(CAN_NODE_BASE);
-  hdr.DataLength = FDCAN_DLC_BYTES_4;
-  if (HAL_FDCAN_AddMessageToTxFifoQ(s_hfdcan, &hdr, (uint8_t*)&iqMean) !=
-      HAL_OK) {
+  hdr.DataLength = FDCAN_DLC_BYTES_6;
+  if (HAL_FDCAN_AddMessageToTxFifoQ(s_hfdcan, &hdr, meanPayload) != HAL_OK) {
     s_iqMeanTxDropCount++;
   }
 
-  hdr.Identifier = CAN_ID_ELEC_ANGLE(CAN_NODE_BASE);
-  hdr.DataLength = FDCAN_DLC_BYTES_2;
-  if (HAL_FDCAN_AddMessageToTxFifoQ(s_hfdcan, &hdr, (uint8_t*)&elAngle) !=
-      HAL_OK) {
-    s_angleTxDropCount++;
-  }
-
+  /* Last of the three, so it is the one that suffers if the invariant above
+   * is ever violated again -- and it is the one that matters most. Keep it
+   * last only while the count is 3. */
   hdr.Identifier = CAN_ID_ENC_COUNT(CAN_NODE_BASE);
   hdr.DataLength = FDCAN_DLC_BYTES_4;
   if (HAL_FDCAN_AddMessageToTxFifoQ(s_hfdcan, &hdr, (uint8_t*)&encCount) !=

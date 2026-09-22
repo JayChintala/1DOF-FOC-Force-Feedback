@@ -54,7 +54,7 @@ HOW TO READ THE RESULT
   - ENC rate short in (a) but ~1000/s in (b) -> Python/GIL. Fix
     can_interface.py: one shared filtered socket, one dispatch thread.
   - ENC rate short in BOTH, with bimodal kernel gaps -> the USB adapter is
-    the ceiling; reduce frames/s (drop the unused ELEC_ANGLE frame,
+    the ceiling; reduce frames/s (lower the telemetry rate,
     decimate telemetry) rather than chasing the Pi side.
   - IQ rate high while ENC rate is short -> firmware FIFO drops, since ENC
     is queued last.
@@ -112,8 +112,8 @@ import can
 
 from can_interface import (
     MotorCANInterface,
-    OFFSET_ELEC_ANGLE,
     OFFSET_ENC_COUNT,
+    OFFSET_IQ_MEAN,
     OFFSET_IQ_READBACK,
 )
 
@@ -136,7 +136,9 @@ LOG_DIR = "logs"
 TELEMETRY_IDS = {}
 for _base, _tag in ((NODE_BASE_A, "A"), (NODE_BASE_B, "B")):
     TELEMETRY_IDS[_base + OFFSET_IQ_READBACK] = f"IQ_READBACK {_tag}"
-    TELEMETRY_IDS[_base + OFFSET_ELEC_ANGLE] = f"ELEC_ANGLE {_tag}"
+    # IQ_MEAN also carries ELEC_ANGLE in bytes 4..5; the standalone 0x013
+    # ELEC_ANGLE frame was retired (only 3 FDCAN Tx elements on the G4).
+    TELEMETRY_IDS[_base + OFFSET_IQ_MEAN] = f"IQ_MEAN {_tag}"
     TELEMETRY_IDS[_base + OFFSET_ENC_COUNT] = f"ENC_COUNT {_tag}"
 
 ENC_IDS = (NODE_BASE_A + OFFSET_ENC_COUNT, NODE_BASE_B + OFFSET_ENC_COUNT)

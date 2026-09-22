@@ -33,8 +33,13 @@
 #define CAN_ID_SET_IQ(base) ((base) + 0x003)
 #define CAN_ID_IQ_READBACK(base) ((base) + 0x010)
 #define CAN_ID_IQ_MEAN(base) ((base) + 0x011)
-#define CAN_ID_ELEC_ANGLE(base) ((base) + 0x013)
 #define CAN_ID_ENC_COUNT(base) ((base) + 0x014)
+
+/* 0x013 (ELEC_ANGLE) is retired -- the electrical angle now travels in bytes
+ * 4..5 of the IQ_MEAN frame. See the hard three-frame limit documented in
+ * CAN_SendTelemetry(): the G4 has only 3 FDCAN Tx elements, so a fourth
+ * frame is dropped on every cycle rather than delayed. Pack new signals into
+ * the spare payload bytes; do not add an ID. */
 
 /* ---- Public API ---- */
 void CAN_Driver_Init(FDCAN_HandleTypeDef* hfdcan);
@@ -47,7 +52,6 @@ void CAN_SendTelemetry(void);
  * sync_registers.c for the pattern if that's added later. */
 uint32_t CAN_GetIqTxDropCount(void);
 uint32_t CAN_GetIqMeanTxDropCount(void);
-uint32_t CAN_GetAngleTxDropCount(void);
 uint32_t CAN_GetEncTxDropCount(void);
 
 /* ---- Iq telemetry conditioning ----

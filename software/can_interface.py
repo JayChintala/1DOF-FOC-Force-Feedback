@@ -2,15 +2,14 @@
 CAN interface module for the 1DOF FOC Force-Feedback project.
 
 Handles command TX (START / STOP / SET_IQ) and telemetry RX
-(IQ_READBACK / ELEC_ANGLE / ENC_COUNT) over SocketCAN (can0, 1 Mbps).
+(IQ_READBACK / IQ_MEAN / ENC_COUNT) over SocketCAN (can0, 1 Mbps).
 
 Protocol (per node, base offset by CAN_NODE_STRIDE * node_index):
     base+0x001 START         Pi->MCU  no payload
     base+0x002 STOP          Pi->MCU  no payload
     base+0x003 SET_IQ        Pi->MCU  float32 LE, Amps
     base+0x010 IQ_READBACK    MCU->Pi float32 LE, Amps (raw), + float32 EWMA
-    base+0x011 IQ_MEAN        MCU->Pi float32 LE, Amps, boxcar mean
-    base+0x013 ELEC_ANGLE     MCU->Pi int16, DPP format
+    base+0x011 IQ_MEAN        MCU->Pi float32 LE Amps boxcar mean + int16 angle
     base+0x014 ENC_COUNT      MCU->Pi uint32, raw TIM4 counter, wraps at M1_PULSE_NBR
 
 ESC 1 uses node_base=0x000 (unchanged from the original single-ESC
@@ -36,8 +35,9 @@ OFFSET_STOP = 0x002
 OFFSET_SET_IQ = 0x003
 OFFSET_IQ_READBACK = 0x010
 OFFSET_IQ_MEAN = 0x011
-OFFSET_ELEC_ANGLE = 0x013
 OFFSET_ENC_COUNT = 0x014
+# 0x013 (ELEC_ANGLE) retired: the angle now rides in bytes 4..5 of IQ_MEAN.
+# The MCU can only have 3 CAN frames in flight, so it sends 3, not 4.
 
 # ENC_PULSE_NBR: wrap modulus of the raw TIM4 encoder counter.
 # Confirmed from MCWorkbench\Src\mc_config_common.c:
@@ -99,12 +99,11 @@ class EncoderUnwrapper:
 
 
 # ---- Shared bus ------------------------------------------------------------
-# Subscribe to ELEC_ANGLE? Default off. Nothing in this repo reads
-# elec_angle_deg (it's the FOC electrical angle, which wraps once per pole
-# pair -- a commutation/alignment diagnostic, not a position source), and it
-# is a third of the bus traffic. Left off, the kernel discards those frames
-# before Python ever sees them. Flip to True if you need the field.
-SUBSCRIBE_ELEC_ANGLE = False
+# There used to be a SUBSCRIBE_ELEC_ANGLE flag here, defaulting off, because
+# ELEC_ANGLE was its own frame and a third of the bus traffic. The angle now
+# rides in the IQ_MEAN frame, which is subscribed unconditionally, so the
+# angle costs nothing extra and the flag is gone. elec_angle_deg is always
+# populated.
 
 
 class _SharedBus:
@@ -124,7 +123,8 @@ class _SharedBus:
     Two things fix it, both here:
       - one socket instead of one per motor, so each frame is parsed once;
       - kernel-side filters (can_filters) for only the IDs actually read, so
-        the ~2000 frames/s of ELEC_ANGLE never cross into user space at all.
+        frames for IDs this process does not read never cross into user
+        space at all.
 
     Registration is dynamic: interfaces come and go with start_listening() /
     stop_listening(), and the filter set is recomputed each time. The socket
@@ -149,8 +149,6 @@ class _SharedBus:
         with self._lock:
             arb_ids = [iface._id_iq_readback, iface._id_iq_mean,
                        iface._id_enc_count]
-            if SUBSCRIBE_ELEC_ANGLE:
-                arb_ids.append(iface._id_elec_angle)
 
             table = self._nodes.setdefault(channel, {})
             for arb_id in arb_ids:
@@ -246,7 +244,7 @@ class MotorCANInterface:
     Command sends are synchronous and non-blocking (fire-and-forget,
     matching the no-ack protocol described).
 
-    Each telemetry signal (IQ_READBACK, ELEC_ANGLE, ENC_COUNT) has its
+    Each telemetry signal (IQ_READBACK, IQ_MEAN, ENC_COUNT) has its
     own timestamp (iq_readback_time / elec_angle_time / enc_count_time)
     so callers can tell which specific signal is stale, rather than
     relying on a single last_rx_time shared across all three.
@@ -278,7 +276,6 @@ class MotorCANInterface:
         self._id_set_iq = node_base + OFFSET_SET_IQ
         self._id_iq_readback = node_base + OFFSET_IQ_READBACK
         self._id_iq_mean = node_base + OFFSET_IQ_MEAN
-        self._id_elec_angle = node_base + OFFSET_ELEC_ANGLE
         self._id_enc_count = node_base + OFFSET_ENC_COUNT
 
         self.iq_readback = None
@@ -361,10 +358,14 @@ class MotorCANInterface:
                 self.iq_readback_bus_time = msg.timestamp
             elif msg.arbitration_id == self._id_iq_mean and len(msg.data) >= 4:
                 (self.iq_mean,) = struct.unpack("<f", msg.data[:4])
-            elif msg.arbitration_id == self._id_elec_angle and len(msg.data) >= 2:
-                (raw,) = struct.unpack("<h", msg.data[:2])
-                self.elec_angle_deg = raw * DPP_TO_DEG
-                self.elec_angle_time = now
+                # Bytes 4..5 carry ELEC_ANGLE, which used to have its own
+                # 0x013 frame. It was folded in here because the G4 FDCAN has
+                # only 3 Tx elements: a 4th frame is dropped outright every
+                # cycle, not delayed. See CAN_SendTelemetry() in can_driver.c.
+                if len(msg.data) >= 6:
+                    (raw,) = struct.unpack("<h", msg.data[4:6])
+                    self.elec_angle_deg = raw * DPP_TO_DEG
+                    self.elec_angle_time = now
             elif msg.arbitration_id == self._id_enc_count and len(msg.data) >= 4:
                 (raw,) = struct.unpack("<I", msg.data[:4])
                 self.enc_count_raw = raw
