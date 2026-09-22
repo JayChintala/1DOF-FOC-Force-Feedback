@@ -89,6 +89,36 @@ static volatile uint16_t hStopPermanencyCounterM1 = ((uint16_t)0);
 
 /* USER CODE BEGIN Private Variables */
 
+/* ---- Iq telemetry conditioning (FLASH 1: telemetry only) ------------------
+ * Fed from FOC_HighFrequencyTask at 16 kHz, drained by CAN_SendTelemetry()
+ * at 1 kHz (SPEED_LOOP_FREQUENCY_HZ). Nothing here feeds the current PI
+ * loop: FOCVars[M1].Iqd is read, never written, so control behaviour is
+ * bit-for-bit unchanged. This exists to make the CAN telemetry a trustworthy
+ * instrument before any control change is attempted.
+ *
+ * WHY: CAN_SendTelemetry() samples the 16 kHz Iq once per millisecond and
+ * drops the other 15 samples. That is a 16:1 decimation with no anti-alias
+ * filter, so everything from 500 Hz to 8 kHz folds down into the 0-500 Hz
+ * band being plotted. Two conditioned variants are published alongside the
+ * untouched raw sample so the three can be compared in a single run:
+ *
+ *   EWMA  - single pole, alpha 0.05, -3 dB at ~131 Hz. Matches PropHand's
+ *           ALPHA_CURRENT_DQ. This is the variant worth promoting into the
+ *           control loop later; only ~-12 dB at the 500 Hz fold point.
+ *   MEAN  - boxcar average of every sample since the last telemetry send.
+ *           A 16-tap boxcar has nulls at exactly 1 kHz, 2 kHz, ... which is
+ *           precisely where aliasing folds from, so this is the better
+ *           instrument for answering "is the noise real or aliased?".
+ *
+ * Units are raw s16A (same as FOCVars[].Iqd.q); can_driver.c scales to Amps
+ * via scaleParams_M1.current so there is no second place to update when
+ * AMPLIFICATION_GAIN changes. */
+#define IQ_TELEM_EWMA_ALPHA 0.05f
+
+static volatile float    s_iqTelemEwma     = 0.0f;
+static volatile float    s_iqTelemAccum    = 0.0f;
+static volatile uint32_t s_iqTelemAccumCnt = 0u;
+
 /* USER CODE END Private Variables */
 
 /* Private functions ---------------------------------------------------------*/
@@ -103,6 +133,52 @@ static uint16_t FOC_CurrControllerM1(void);
 void TSK_SafetyTask_PWMOFF(uint8_t motor);
 
 /* USER CODE BEGIN Private Functions */
+
+/* Declared in can_driver.h -- see the note there about why the telemetry
+ * accessors are declared by the consumer rather than by a header of their
+ * own (avoiding a new source file that would need adding to the build). */
+
+/* Called from FOC_HighFrequencyTask at 16 kHz, after FOC_CurrControllerM1()
+ * has published FOCVars[M1].Iqd. Runs in the ADC ISR: keep it branch-free
+ * and FPU-only. */
+void IqTelem_UpdateHF(int16_t iq_s16)
+{
+  float const iq = (float)iq_s16;
+
+  /* Local read-modify-write so the volatile is touched once each way. */
+  float ewma = s_iqTelemEwma;
+  ewma += IQ_TELEM_EWMA_ALPHA * (iq - ewma);
+  s_iqTelemEwma = ewma;
+
+  s_iqTelemAccum    = s_iqTelemAccum + iq;
+  s_iqTelemAccumCnt = s_iqTelemAccumCnt + 1u;
+}
+
+/* Single aligned 32-bit load -- atomic against the ISR on Cortex-M4, so no
+ * masking needed here. */
+float IqTelem_GetEwma(void)
+{
+  return s_iqTelemEwma;
+}
+
+/* Sum and count must be snapshotted and cleared together, so this one does
+ * need the ISR held off. Costs the HF task a few cycles of jitter at 1 kHz.
+ * Returns the EWMA if no samples accrued (motor stopped, HF task not
+ * running) so the field never reads as a bogus zero. */
+float IqTelem_GetMeanAndReset(void)
+{
+  uint32_t const primask = __get_PRIMASK();
+  __disable_irq();
+
+  float    const sum = s_iqTelemAccum;
+  uint32_t const cnt = s_iqTelemAccumCnt;
+  s_iqTelemAccum    = 0.0f;
+  s_iqTelemAccumCnt = 0u;
+
+  __set_PRIMASK(primask);
+
+  return (cnt > 0u) ? (sum / (float)cnt) : s_iqTelemEwma;
+}
 
 /* USER CODE END Private Functions */
 /**
@@ -589,6 +665,11 @@ __weak uint8_t FOC_HighFrequencyTask(uint8_t bMotorNbr)
   /* USER CODE END HighFrequencyTask SINGLEDRIVE_1 */
   hFOCreturn = FOC_CurrControllerM1();
   /* USER CODE BEGIN HighFrequencyTask SINGLEDRIVE_2 */
+
+  /* FOC_CurrControllerM1() has just stored FOCVars[M1].Iqd, so this sees the
+   * current cycle's value. Telemetry conditioning only -- does not write
+   * back into FOCVars, so the PI controllers are unaffected. */
+  IqTelem_UpdateHF(FOCVars[M1].Iqd.q);
 
   /* USER CODE END HighFrequencyTask SINGLEDRIVE_2 */
   if(hFOCreturn == MC_DURATION)

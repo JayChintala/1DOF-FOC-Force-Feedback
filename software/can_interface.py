@@ -8,7 +8,8 @@ Protocol (per node, base offset by CAN_NODE_STRIDE * node_index):
     base+0x001 START         Pi->MCU  no payload
     base+0x002 STOP          Pi->MCU  no payload
     base+0x003 SET_IQ        Pi->MCU  float32 LE, Amps
-    base+0x010 IQ_READBACK    MCU->Pi float32 LE, Amps
+    base+0x010 IQ_READBACK    MCU->Pi float32 LE, Amps (raw), + float32 EWMA
+    base+0x011 IQ_MEAN        MCU->Pi float32 LE, Amps, boxcar mean
     base+0x013 ELEC_ANGLE     MCU->Pi int16, DPP format
     base+0x014 ENC_COUNT      MCU->Pi uint32, raw TIM4 counter, wraps at M1_PULSE_NBR
 
@@ -34,6 +35,7 @@ OFFSET_START = 0x001
 OFFSET_STOP = 0x002
 OFFSET_SET_IQ = 0x003
 OFFSET_IQ_READBACK = 0x010
+OFFSET_IQ_MEAN = 0x011
 OFFSET_ELEC_ANGLE = 0x013
 OFFSET_ENC_COUNT = 0x014
 
@@ -145,7 +147,8 @@ class _SharedBus:
     def register(self, iface, channel, bustype):
         """Subscribe iface's telemetry IDs and make sure the RX thread runs."""
         with self._lock:
-            arb_ids = [iface._id_iq_readback, iface._id_enc_count]
+            arb_ids = [iface._id_iq_readback, iface._id_iq_mean,
+                       iface._id_enc_count]
             if SUBSCRIBE_ELEC_ANGLE:
                 arb_ids.append(iface._id_elec_angle)
 
@@ -274,10 +277,21 @@ class MotorCANInterface:
         self._id_stop = node_base + OFFSET_STOP
         self._id_set_iq = node_base + OFFSET_SET_IQ
         self._id_iq_readback = node_base + OFFSET_IQ_READBACK
+        self._id_iq_mean = node_base + OFFSET_IQ_MEAN
         self._id_elec_angle = node_base + OFFSET_ELEC_ANGLE
         self._id_enc_count = node_base + OFFSET_ENC_COUNT
 
         self.iq_readback = None
+        # Conditioned Iq variants, both in Amps, computed in the 16 kHz FOC
+        # ISR (see IqTelem_* in mc_tasks_foc.c). iq_readback stays the raw
+        # once-per-millisecond sample it has always been, so nothing that
+        # reads it changes behaviour.
+        #   iq_ewma - single-pole, -3 dB at ~131 Hz
+        #   iq_mean - boxcar average over every 16 kHz sample in the interval
+        # Compare all three on one trace to separate aliasing from real noise:
+        # if raw is noisy and mean is smooth, the noise was never in-band.
+        self.iq_ewma = None
+        self.iq_mean = None
         self.elec_angle_deg = None
         self.enc_count_raw = None
         self.enc_count_unwrapped = None
@@ -338,8 +352,15 @@ class MotorCANInterface:
             now = time.time()
             if msg.arbitration_id == self._id_iq_readback and len(msg.data) >= 4:
                 (self.iq_readback,) = struct.unpack("<f", msg.data[:4])
+                # Bytes 4..7 carry the EWMA. Guarded on length so a node
+                # still running pre-Flash-1 firmware (4-byte frame) keeps
+                # working and simply leaves iq_ewma at None.
+                if len(msg.data) >= 8:
+                    (self.iq_ewma,) = struct.unpack("<f", msg.data[4:8])
                 self.iq_readback_time = now
                 self.iq_readback_bus_time = msg.timestamp
+            elif msg.arbitration_id == self._id_iq_mean and len(msg.data) >= 4:
+                (self.iq_mean,) = struct.unpack("<f", msg.data[:4])
             elif msg.arbitration_id == self._id_elec_angle and len(msg.data) >= 2:
                 (raw,) = struct.unpack("<h", msg.data[:2])
                 self.elec_angle_deg = raw * DPP_TO_DEG
@@ -358,6 +379,8 @@ class MotorCANInterface:
         with self._lock:
             return {
                 "iq_readback": self.iq_readback,
+                "iq_ewma": self.iq_ewma,
+                "iq_mean": self.iq_mean,
                 "elec_angle_deg": self.elec_angle_deg,
                 "enc_count_raw": self.enc_count_raw,
                 "enc_count_unwrapped": self.enc_count_unwrapped,

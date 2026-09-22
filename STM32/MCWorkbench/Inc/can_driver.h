@@ -32,6 +32,7 @@
 #define CAN_ID_STOP(base) ((base) + 0x002)
 #define CAN_ID_SET_IQ(base) ((base) + 0x003)
 #define CAN_ID_IQ_READBACK(base) ((base) + 0x010)
+#define CAN_ID_IQ_MEAN(base) ((base) + 0x011)
 #define CAN_ID_ELEC_ANGLE(base) ((base) + 0x013)
 #define CAN_ID_ENC_COUNT(base) ((base) + 0x014)
 
@@ -45,7 +46,21 @@ void CAN_SendTelemetry(void);
  * exposed via the MC register interface -- see MC_REG_SECTOR in
  * sync_registers.c for the pattern if that's added later. */
 uint32_t CAN_GetIqTxDropCount(void);
+uint32_t CAN_GetIqMeanTxDropCount(void);
 uint32_t CAN_GetAngleTxDropCount(void);
 uint32_t CAN_GetEncTxDropCount(void);
+
+/* ---- Iq telemetry conditioning ----
+ * Defined in the USER CODE blocks of mc_tasks_foc.c, because that is where
+ * the 16 kHz HighFrequencyTask lives and a separate source file would have
+ * to be added to the CubeIDE build. Declared here because can_driver.c is
+ * the only consumer. Values are in raw s16A, matching FOCVars[].Iqd.q --
+ * scale with scaleParams_M1.current to get Amps.
+ *
+ * NOTE: these live in USER CODE BEGIN/END blocks, so they survive a
+ * MotorControl Workbench regeneration. */
+void IqTelem_UpdateHF(int16_t iq_s16);
+float IqTelem_GetEwma(void);
+float IqTelem_GetMeanAndReset(void);
 
 #endif /* CAN_DRIVER_H */

@@ -51,11 +51,13 @@ fp-info-cache
 STM32/MCWorkbench/Drivers/
 STM32/MCWorkbench/MCSDK*/
 STM32/MCWorkbench/EWARM/
-STM32/MCWorkbench/STM32CubeIDE/*
-!STM32/MCWorkbench/STM32CubeIDE/.cproject
-!STM32/MCWorkbench/STM32CubeIDE/.project
-!STM32/MCWorkbench/STM32CubeIDE/*.launch
 STM32/MCWorkbench/.mxproject
+
+# STM32CubeIDE: ignore build output only, so hand-written .c/.h,
+# the linker script and the project/launch configs stay tracked
+STM32/MCWorkbench/STM32CubeIDE/Debug*/
+STM32/MCWorkbench/STM32CubeIDE/Release*/
+STM32/MCWorkbench/STM32CubeIDE/.settings/
 
 # Logs and temp files
 *.log
@@ -84,3 +86,6 @@ datasheets
 logs/
 software/logs/
 software/__pycache__/
+
+# PropHand (separate project, not part of this repo)
+PropHand Code/
