@@ -1,16 +1,30 @@
 """
 CAN interface module for the 1DOF FOC Force-Feedback project.
 
-Handles command TX (START / STOP / SET_IQ) and telemetry RX
-(IQ_READBACK / IQ_MEAN / ENC_COUNT) over SocketCAN (can0, 1 Mbps).
+Handles command TX (START / STOP / SET_IQ) and telemetry RX (one merged
+TELEM frame) over SocketCAN (can0, 1 Mbps).
 
 Protocol (per node, base offset by CAN_NODE_STRIDE * node_index):
-    base+0x001 START         Pi->MCU  no payload
-    base+0x002 STOP          Pi->MCU  no payload
-    base+0x003 SET_IQ        Pi->MCU  float32 LE, Amps
-    base+0x010 IQ_READBACK    MCU->Pi float32 LE, Amps (raw), + float32 EWMA
-    base+0x011 IQ_MEAN        MCU->Pi float32 LE Amps boxcar mean + int16 angle
-    base+0x014 ENC_COUNT      MCU->Pi uint32, raw TIM4 counter, wraps at M1_PULSE_NBR
+    base+0x001 START   Pi->MCU  no payload
+    base+0x002 STOP    Pi->MCU  no payload
+    base+0x003 SET_IQ  Pi->MCU  float32 LE, Amps
+    base+0x012 TELEM   MCU->Pi  8 bytes LE, once per 1 kHz firmware tick:
+                         [0..3] float32 Iq, Amps (raw, unfiltered)
+                         [4..5] uint16  raw TIM4 count, 0..3999
+                         [6..7] uint16  MCU microsecond clock, wraps at 65536
+
+TELEM replaced three separate frames (IQ_READBACK 0x010, IQ_MEAN 0x011,
+ENC_COUNT 0x014, plus the earlier standalone ELEC_ANGLE 0x013). Two motors
+at 1 kHz went from 6000 frames/s to 2000, and from three Pi-side interrupts
+per tick to one. The dropped signals -- the Iq EWMA, the Iq boxcar mean and
+the electrical angle -- had no readers anywhere in this directory; they were
+being generated, transmitted, parsed and discarded.
+
+The merge also fixed something the frame-count saving is incidental to:
+Iq and position now share one timestamp by construction. They used to
+arrive in separate frames whose relative delay nothing bounded, so any
+controller reading current and position together carried a skew it could
+neither measure nor correct.
 
 ESC 1 uses node_base=0x000 (unchanged from the original single-ESC
 protocol). ESC 2 uses node_base=0x020, matching the firmware-side
@@ -20,6 +34,8 @@ Known gotcha: SET_IQ is silently dropped by firmware unless the motor is
 already in RUN state. Always START, wait briefly, then SET_IQ.
 """
 
+import os
+import socket
 import struct
 import threading
 import time
@@ -33,11 +49,13 @@ CAN_NODE_STRIDE = 0x020
 OFFSET_START = 0x001
 OFFSET_STOP = 0x002
 OFFSET_SET_IQ = 0x003
-OFFSET_IQ_READBACK = 0x010
-OFFSET_IQ_MEAN = 0x011
-OFFSET_ENC_COUNT = 0x014
-# 0x013 (ELEC_ANGLE) retired: the angle now rides in bytes 4..5 of IQ_MEAN.
-# The MCU can only have 3 CAN frames in flight, so it sends 3, not 4.
+OFFSET_TELEM = 0x012
+# 0x010 (IQ_READBACK), 0x011 (IQ_MEAN), 0x013 (ELEC_ANGLE) and 0x014
+# (ENC_COUNT) are all retired -- see the module docstring. TELEM deliberately
+# does NOT reuse 0x010: the old 0x010 payload also started with a float32 Iq,
+# so a node left on pre-merge firmware would parse as valid here while its
+# former EWMA bytes were read as an encoder count and a timestamp. A fresh ID
+# makes a half-flashed bus fall silent instead, which is a failure you notice.
 
 # ENC_PULSE_NBR: wrap modulus of the raw TIM4 encoder counter.
 # Confirmed from MCWorkbench\Src\mc_config_common.c:
@@ -51,26 +69,31 @@ OFFSET_ENC_COUNT = 0x014
 # math, so 4000 is the correct modulus here.
 ENC_PULSE_NBR = 4000
 
-# DPP_TO_DEG: conversion from the int16 ELEC_ANGLE "DPP" value to degrees.
-# Signed 16-bit value spanning +-180 electrical degrees (32768 counts =
-# 180 deg).
-DPP_TO_DEG = 180.0 / 32768.0
+# Modulus of the MCU's microsecond timestamp field (uint16). It wraps every
+# 65.536 ms against a 1 ms send period, so consecutive samples are never
+# ambiguous -- the same unwrap the encoder count gets.
+MCU_CLOCK_MODULUS = 1 << 16
 # ------------------------------------------------------------------------
 
 
-class EncoderUnwrapper:
+class WrappingCounter:
     """
-    Converts a wrapping uint32 encoder counter into a continuous float
-    count by tracking wraparounds between consecutive samples.
+    Converts a counter that wraps at a fixed modulus into a continuous
+    value, by tracking wraparounds between consecutive samples.
 
-    Assumes consecutive samples never differ by more than half a
-    revolution's worth of counts (i.e. you're sampling fast enough
-    relative to shaft speed). If you spin the shaft faster than that
-    between reads, this will misdetect wrap direction.
+    Used twice: for the raw encoder count (modulus ENC_PULSE_NBR) and for
+    the MCU's uint16 microsecond clock (modulus MCU_CLOCK_MODULUS). Both
+    are the same problem.
+
+    Assumes consecutive samples never differ by more than half the modulus
+    (i.e. you're sampling fast enough relative to how fast the counter
+    moves). For the encoder that means not spinning the shaft faster than
+    half a revolution per sample; for the microsecond clock it means a send
+    period well under 32.768 ms, which at 1 kHz it is by a factor of 32.
     """
 
-    def __init__(self, pulse_nbr: int = ENC_PULSE_NBR):
-        self.pulse_nbr = pulse_nbr
+    def __init__(self, modulus: int = ENC_PULSE_NBR):
+        self.modulus = modulus
         self._last_raw = None
         self._revolutions = 0
 
@@ -80,7 +103,7 @@ class EncoderUnwrapper:
             return float(raw_count)
 
         delta = raw_count - self._last_raw
-        half = self.pulse_nbr / 2
+        half = self.modulus / 2
 
         if delta > half:
             # wrapped backward (raw jumped from near-0 to near-max)
@@ -90,7 +113,7 @@ class EncoderUnwrapper:
             self._revolutions += 1
 
         self._last_raw = raw_count
-        return raw_count + self._revolutions * self.pulse_nbr
+        return raw_count + self._revolutions * self.modulus
 
     def reset(self):
         self._last_raw = None
@@ -99,11 +122,79 @@ class EncoderUnwrapper:
 
 
 # ---- Shared bus ------------------------------------------------------------
-# There used to be a SUBSCRIBE_ELEC_ANGLE flag here, defaulting off, because
-# ELEC_ANGLE was its own frame and a third of the bus traffic. The angle now
-# rides in the IQ_MEAN frame, which is subscribed unconditionally, so the
-# angle costs nothing extra and the flag is gone. elec_angle_deg is always
-# populated.
+# There used to be a SUBSCRIBE_ELEC_ANGLE flag here, then a note explaining
+# that the angle had been folded into IQ_MEAN so the flag was unnecessary.
+# Both are gone: the electrical angle is not transmitted at all any more.
+# Nothing read it, and a signal nothing reads still costs a Tx slot on the
+# MCU, bus bandwidth, an interrupt and a parse on the Pi.
+
+# RX socket buffer, bytes. The kernel default is ~208 KB, which at 2000
+# frames/s is many seconds of slack -- until the RX thread is descheduled in
+# a burst, which telemetry_rate_probe.py measured happening (p99 ~33 ms,
+# worst 48 ms, ~0.2% of frames lost to socket-queue overflow). Overflow is
+# silent and drops the OLDEST frames, so it corrupts velocity estimates
+# rather than announcing itself. Buying headroom here is far cheaper than
+# the alternative.
+#
+# The kernel doubles whatever SO_RCVBUF asks for (bookkeeping overhead), so
+# this requests 2 MB and yields ~4 MB -- which is rmem_max on this host.
+# Above rmem_max the request is silently clamped, not refused; raising it
+# further needs SO_RCVBUFFORCE and CAP_NET_ADMIN, which is not worth it.
+RX_BUFFER_BYTES = 2 * 1024 * 1024
+
+# SCHED_FIFO priority for the RX thread. Low enough to sit under anything the
+# kernel runs at 50+, high enough to preempt every SCHED_OTHER task on the
+# box -- which is the point: the thread only has to run for a few
+# microseconds per frame, and the damage comes entirely from it not being
+# scheduled promptly. Best-effort; see _apply_rx_thread_priority().
+RX_THREAD_RT_PRIORITY = 20
+
+
+def _enlarge_rx_buffer(bus, nbytes: int = RX_BUFFER_BYTES):
+    """
+    Raise SO_RCVBUF on the SocketCAN socket. Best-effort and non-fatal.
+
+    python-can exposes the raw socket as .socket on the socketcan backend
+    only; on any other backend (virtual buses in tests, slcan, a USB
+    adapter) there is nothing to tune and nothing to complain about.
+    """
+    sock = getattr(bus, "socket", None)
+    if sock is None:
+        return None
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, nbytes)
+        return sock.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
+    except OSError:
+        # Clamped or refused by the kernel. The default buffer still works,
+        # it just has less headroom -- not worth failing a run over.
+        return None
+
+
+def _apply_rx_thread_priority(priority: int = RX_THREAD_RT_PRIORITY):
+    """
+    Put the calling thread on SCHED_FIFO. Best-effort: silently does nothing
+    without CAP_SYS_NICE (or a matching RTPRIO rlimit), and nothing at all
+    off Linux.
+
+    WHY: every microsecond between a frame landing in the socket queue and
+    this thread parsing it is jitter on the timestamps the control loop
+    reads. Under SCHED_OTHER the thread competes with the control loop and
+    with everything else on the box, and the measured result was bursts
+    where it simply did not run for tens of milliseconds.
+
+    This is the half of the fix that lives in the process. The other half --
+    steering the CAN IRQ onto a core the control loop is not using -- is
+    system configuration, not something a library can do to itself; see
+    setup_can_realtime.sh.
+    """
+    setter = getattr(os, "sched_setscheduler", None)
+    if setter is None:
+        return False
+    try:
+        setter(0, os.SCHED_FIFO, os.sched_param(priority))
+        return True
+    except (OSError, PermissionError, AttributeError):
+        return False
 
 
 class _SharedBus:
@@ -147,8 +238,7 @@ class _SharedBus:
     def register(self, iface, channel, bustype):
         """Subscribe iface's telemetry IDs and make sure the RX thread runs."""
         with self._lock:
-            arb_ids = [iface._id_iq_readback, iface._id_iq_mean,
-                       iface._id_enc_count]
+            arb_ids = [iface._id_telem]
 
             table = self._nodes.setdefault(channel, {})
             for arb_id in arb_ids:
@@ -160,6 +250,7 @@ class _SharedBus:
                     channel=channel, bustype=bustype,
                     can_filters=self._filters_for(channel),
                 )
+                _enlarge_rx_buffer(self._buses[channel])
             else:
                 # A later interface widens the filter set on the live socket.
                 self._buses[channel].set_filters(self._filters_for(channel))
@@ -211,6 +302,7 @@ class _SharedBus:
             bus.send(msg)
 
     def _rx_loop(self, channel):
+        _apply_rx_thread_priority()
         bus = self._buses[channel]
         while self._running.get(channel):
             try:
@@ -244,17 +336,33 @@ class MotorCANInterface:
     Command sends are synchronous and non-blocking (fire-and-forget,
     matching the no-ack protocol described).
 
-    Each telemetry signal (IQ_READBACK, IQ_MEAN, ENC_COUNT) has its
-    own timestamp (iq_readback_time / elec_angle_time / enc_count_time)
-    so callers can tell which specific signal is stale, rather than
-    relying on a single last_rx_time shared across all three.
+    Iq and the encoder count now arrive in ONE frame, so the per-signal
+    timestamps that used to distinguish them (iq_readback_time vs
+    enc_count_time) are necessarily equal. Both names are kept, because a
+    pile of scripts in this directory read one or the other, and because
+    "which signal is stale" is still a meaningful question if a third
+    signal is ever added back.
 
-    Those timestamps are taken when the RX thread PARSES the frame, which
-    is not when the frame arrived -- see _SharedBus for the measured gap.
-    enc_count_bus_time / iq_readback_bus_time carry the KERNEL's receive
-    timestamp (msg.timestamp) instead, which is when the frame actually
-    landed. Use those two for anything latency- or velocity-related, and the
-    parse-time ones only for "is this link alive".
+    THREE CLOCKS, in increasing order of how much you should trust them for
+    anything involving a derivative:
+
+      *_time          when the RX thread PARSED the frame. Scheduling noise
+                      on top of everything below it. Use only for "is this
+                      link alive".
+      *_bus_time      the KERNEL's receive timestamp (msg.timestamp) -- when
+                      the frame actually landed. Free of GIL and thread
+                      scheduling, but still carries Tx FIFO wait, bus
+                      arbitration and IRQ latency.
+      mcu_time_us     the MCU's own microsecond clock, sampled in the same
+                      breath as Iq and the encoder count. Immune to the
+                      transport entirely.
+
+    Velocity should be differentiated against mcu_time_us. A 1 ms nominal
+    period with a transport whose p99 jitter is 0.27 ms means dt taken from
+    arrival times is wrong by up to ~27%, and that error lands directly on
+    the derivative, where a controller's D term amplifies it. dt from
+    mcu_time_us is exact regardless of what the transport did -- and stays
+    exact if the link is ever moved to UART.
 
     Multiple instances (one per node_base) share the same physical bus and
     the same socket; each only sees its own node's IDs, because the dispatch
@@ -262,7 +370,8 @@ class MotorCANInterface:
     """
 
     def __init__(self, channel: str = "can0", bustype: str = "socketcan", node_base: int = 0x000):
-        self._unwrapper = EncoderUnwrapper()
+        self._unwrapper = WrappingCounter(ENC_PULSE_NBR)
+        self._clock_unwrapper = WrappingCounter(MCU_CLOCK_MODULUS)
         self.node_base = node_base
         self._channel = channel
         self._bustype = bustype
@@ -274,30 +383,27 @@ class MotorCANInterface:
         self._id_start = node_base + OFFSET_START
         self._id_stop = node_base + OFFSET_STOP
         self._id_set_iq = node_base + OFFSET_SET_IQ
-        self._id_iq_readback = node_base + OFFSET_IQ_READBACK
-        self._id_iq_mean = node_base + OFFSET_IQ_MEAN
-        self._id_enc_count = node_base + OFFSET_ENC_COUNT
+        self._id_telem = node_base + OFFSET_TELEM
 
+        # Raw, unfiltered Iq in Amps, sampled once per firmware tick. The
+        # 16 kHz EWMA and boxcar mean the firmware also computes are no
+        # longer transmitted -- nothing here read them. If raw Iq turns out
+        # too noisy to control on, the fix is one line in CAN_SendTelemetry()
+        # (send IqTelem_GetEwma() instead) and nothing on this side.
         self.iq_readback = None
-        # Conditioned Iq variants, both in Amps, computed in the 16 kHz FOC
-        # ISR (see IqTelem_* in mc_tasks_foc.c). iq_readback stays the raw
-        # once-per-millisecond sample it has always been, so nothing that
-        # reads it changes behaviour.
-        #   iq_ewma - single-pole, -3 dB at ~131 Hz
-        #   iq_mean - boxcar average over every 16 kHz sample in the interval
-        # Compare all three on one trace to separate aliasing from real noise:
-        # if raw is noisy and mean is smooth, the noise was never in-band.
-        self.iq_ewma = None
-        self.iq_mean = None
-        self.elec_angle_deg = None
         self.enc_count_raw = None
         self.enc_count_unwrapped = None
+
+        # MCU microsecond clock, unwrapped past the uint16 rollover into a
+        # continuous count. Arbitrary epoch -- only differences are
+        # meaningful, which is all a dt needs.
+        self.mcu_time_us = None
+
         self.last_rx_time = None
 
-        # Per-signal timestamps -- set only when that specific signal's
-        # frame arrives, so staleness can be measured per-signal.
+        # Parse-time stamps. Equal to each other now that one frame carries
+        # both signals; kept as separate names so existing callers work.
         self.iq_readback_time = None
-        self.elec_angle_time = None
         self.enc_count_time = None
 
         # Kernel (SocketCAN) receive timestamps -- when the frame arrived,
@@ -343,51 +449,48 @@ class MotorCANInterface:
     # ---- telemetry (MCU -> Pi) ----
     def _handle_message(self, msg: "can.Message"):
         # Called from the shared RX thread, which only routes the IDs this
-        # instance subscribed to. The per-ID checks below still stand, so the
+        # instance subscribed to. The ID check below still stands, so the
         # method stays correct if it is ever handed an unrelated frame.
+        #
+        # Length is checked strictly rather than with the >= that the old
+        # multi-frame parser used. That leniency existed to stay compatible
+        # with a node on older firmware sending a shorter frame; it cannot
+        # serve that purpose here, because a short TELEM frame has no valid
+        # interpretation -- the encoder count and timestamp are at fixed
+        # offsets at the END of the payload, so a truncated frame would
+        # silently yield a stale position rather than a detectably absent
+        # one. Better to ignore it.
+        if msg.arbitration_id != self._id_telem or len(msg.data) != 8:
+            return
+
+        iq, enc_raw, mcu_us = struct.unpack("<fHH", msg.data)
+
         with self._lock:
             now = time.time()
-            if msg.arbitration_id == self._id_iq_readback and len(msg.data) >= 4:
-                (self.iq_readback,) = struct.unpack("<f", msg.data[:4])
-                # Bytes 4..7 carry the EWMA. Guarded on length so a node
-                # still running pre-Flash-1 firmware (4-byte frame) keeps
-                # working and simply leaves iq_ewma at None.
-                if len(msg.data) >= 8:
-                    (self.iq_ewma,) = struct.unpack("<f", msg.data[4:8])
-                self.iq_readback_time = now
-                self.iq_readback_bus_time = msg.timestamp
-            elif msg.arbitration_id == self._id_iq_mean and len(msg.data) >= 4:
-                (self.iq_mean,) = struct.unpack("<f", msg.data[:4])
-                # Bytes 4..5 carry ELEC_ANGLE, which used to have its own
-                # 0x013 frame. It was folded in here because the G4 FDCAN has
-                # only 3 Tx elements: a 4th frame is dropped outright every
-                # cycle, not delayed. See CAN_SendTelemetry() in can_driver.c.
-                if len(msg.data) >= 6:
-                    (raw,) = struct.unpack("<h", msg.data[4:6])
-                    self.elec_angle_deg = raw * DPP_TO_DEG
-                    self.elec_angle_time = now
-            elif msg.arbitration_id == self._id_enc_count and len(msg.data) >= 4:
-                (raw,) = struct.unpack("<I", msg.data[:4])
-                self.enc_count_raw = raw
-                self.enc_count_unwrapped = self._unwrapper.update(raw)
-                self.enc_count_time = now
-                self.enc_count_bus_time = msg.timestamp
-            else:
-                return  # not this node's message -- don't update last_rx_time
+            self.iq_readback = iq
+            self.enc_count_raw = enc_raw
+            self.enc_count_unwrapped = self._unwrapper.update(enc_raw)
+            self.mcu_time_us = self._clock_unwrapper.update(mcu_us)
+
+            # One frame, so these are the same instant by construction --
+            # which is the whole point of the merge.
+            self.iq_readback_time = now
+            self.enc_count_time = now
+            self.iq_readback_bus_time = msg.timestamp
+            self.enc_count_bus_time = msg.timestamp
             self.last_rx_time = now
 
     def get_telemetry(self) -> dict:
         with self._lock:
             return {
                 "iq_readback": self.iq_readback,
-                "iq_ewma": self.iq_ewma,
-                "iq_mean": self.iq_mean,
-                "elec_angle_deg": self.elec_angle_deg,
                 "enc_count_raw": self.enc_count_raw,
                 "enc_count_unwrapped": self.enc_count_unwrapped,
+                # Differentiate position against this, not against the
+                # arrival times below. See the class docstring.
+                "mcu_time_us": self.mcu_time_us,
                 "last_rx_time": self.last_rx_time,
                 "iq_readback_time": self.iq_readback_time,
-                "elec_angle_time": self.elec_angle_time,
                 "enc_count_time": self.enc_count_time,
                 "iq_readback_bus_time": self.iq_readback_bus_time,
                 "enc_count_bus_time": self.enc_count_bus_time,

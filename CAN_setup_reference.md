@@ -55,9 +55,9 @@ Board has an onboard TCAN330 CAN transceiver (UM2516 §5.5). No external transce
 #define CAN_ID_START(base)       ((base) + 0x001U)
 #define CAN_ID_STOP(base)        ((base) + 0x002U)
 #define CAN_ID_SET_IQ(base)      ((base) + 0x003U)
-#define CAN_ID_IQ_READBACK(base) ((base) + 0x010U)
-#define CAN_ID_ELEC_ANGLE(base)  ((base) + 0x013U)
-#define CAN_ID_ENC_COUNT(base)   ((base) + 0x014U)
+#define CAN_ID_TELEM(base)       ((base) + 0x012U)
+/* 0x010 IQ_READBACK, 0x011 IQ_MEAN, 0x013 ELEC_ANGLE, 0x014 ENC_COUNT:
+   all retired and merged into TELEM. Do not reuse those IDs. */
 
 void CAN_Driver_Init(FDCAN_HandleTypeDef* hfdcan);
 void CAN_ProcessPendingMessages(void);
@@ -70,7 +70,8 @@ void CAN_SendTelemetry(void);
 - `CAN_Driver_Init()` — NVIC enable, standard-ID range filter (`0x001`–`0x003` → RX FIFO0), global filter set to reject non-matching frames, activate RX notification, start peripheral.
 - `HAL_FDCAN_RxFifo0Callback()` — parses START/STOP/SET_IQ into a "latest wins" pending-command struct (ISR context — keep minimal, defer motor calls).
 - `CAN_ProcessPendingMessages()` — called from non-ISR context, drains pending struct into `MC_StartMotor1()` / `MC_StopMotor1()` / `MC_SetCurrentReferenceMotor1_F()`. SET_IQ is dropped if motor isn't in RUN state (Pi must sequence START before SET_IQ).
-- `CAN_SendTelemetry()` — transmits IQ (`MC_GetIqdMotor1_F()`), electrical angle (`MC_GetElAngledppMotor1()`), and raw encoder count (`__HAL_TIM_GET_COUNTER(&htim4)`, 16-bit, wraps at `M1_PULSE_NBR`).
+- `CAN_SendTelemetry()` — transmits ONE 8-byte frame (`CAN_ID_TELEM`, base+`0x012`): Iq (`MC_GetIqdMotor1_F()`) as float32, raw encoder count (`__HAL_TIM_GET_COUNTER(&htim4)`, wraps at `M1_PULSE_NBR`) as uint16, and a uint16 microsecond timestamp from `DWT->CYCCNT`. The separate IQ_READBACK / IQ_MEAN / ELEC_ANGLE / ENC_COUNT frames are retired; the electrical angle and the conditioned-Iq variants are no longer sent, as nothing read them.
+- `MicroClock_Init()` / `MicroClock_Now_u16()` — DWT cycle-counter microsecond timebase for that timestamp. Deliberately NOT a timer peripheral: DWT needs no `.ioc` entry, so Workbench regeneration cannot revert it.
 
 ### `Src/main.c`
 - `#include "can_driver.h"`

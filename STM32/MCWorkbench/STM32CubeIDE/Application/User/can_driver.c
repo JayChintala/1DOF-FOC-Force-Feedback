@@ -7,7 +7,9 @@
 
 #include "main.h"   /* for Error_Handler() */
 #include "mc_api.h" /* for MC_StartMotor1, MC_StopMotor1, etc. */
-#include "mc_parameters.h" /* for scaleParams_M1 (s16A -> Amps) */
+#include "mc_parameters.h" /* for scaleParams_M1 (s16A -> Amps), used only
+                              if the Iq sent below is switched to the
+                              IqTelem EWMA -- see CAN_SendTelemetry() */
 
 static FDCAN_HandleTypeDef* s_hfdcan = NULL;
 
@@ -27,28 +29,90 @@ typedef struct {
 static volatile CAN_CmdState_t s_cmd = {0};
 
 /* Incremented whenever HAL_FDCAN_AddMessageToTxFifoQ() fails for the
- * corresponding telemetry message (e.g. hardware Tx FIFO still full because
- * this node keeps losing arbitration to a lower-ID node on the bus).
+ * telemetry message (e.g. hardware Tx FIFO still full because this node
+ * keeps losing arbitration to a lower-ID node on the bus).
  *
- * NOT wired into the MC register interface, so nothing reads them at runtime
+ * NOT wired into the MC register interface, so nothing reads it at runtime
  * -- which is why the ENC_COUNT overflow described in CAN_SendTelemetry()
- * went unnoticed. Read them over SWD, or follow the MC_REG_SECTOR pattern in
- * sync_registers.c to expose them. There is no separate angle counter: the
- * electrical angle rides in the IQ_MEAN frame. */
-static volatile uint32_t s_iqTxDropCount = 0;
-static volatile uint32_t s_iqMeanTxDropCount = 0;
-static volatile uint32_t s_encTxDropCount = 0;
+ * went unnoticed for so long. Read it over SWD, or follow the MC_REG_SECTOR
+ * pattern in sync_registers.c to expose it. One counter now, because there
+ * is one telemetry frame. */
+static volatile uint32_t s_telemTxDropCount = 0;
 
-uint32_t CAN_GetIqTxDropCount(void) { return s_iqTxDropCount; }
-uint32_t CAN_GetIqMeanTxDropCount(void) { return s_iqMeanTxDropCount; }
-uint32_t CAN_GetEncTxDropCount(void) { return s_encTxDropCount; }
+uint32_t CAN_GetTelemTxDropCount(void) { return s_telemTxDropCount; }
+
+/* ---- Microsecond timebase for the telemetry timestamp ----
+ *
+ * The Pi used to derive dt from its own arrival times, which folds every
+ * source of transport jitter -- Tx FIFO wait, arbitration, kernel IRQ
+ * latency, the GIL -- straight into any velocity computed from consecutive
+ * encoder samples. telemetry_rate_probe.py measured a p99 of 0.27 ms on a
+ * filtered socket and far worse before that, against a 1 ms sample period:
+ * the same jitter as the signal. Timestamping at the source makes dt a
+ * property of the MCU's clock instead, and the transport can then be as
+ * late as it likes without corrupting the derivative.
+ *
+ * DWT->CYCCNT is the timebase because it is free: a core-resident 32-bit
+ * cycle counter on the Cortex-M4, no timer peripheral to allocate and -- the
+ * reason that matters here -- no .ioc change, so MotorControl Workbench
+ * regeneration cannot silently revert it (see the Gotchas in
+ * CAN_setup_reference.md).
+ *
+ * Divisor comes from SystemCoreClock rather than a hardcoded 170 so that a
+ * clock-tree change cannot quietly rescale every dt on the Pi. */
+static uint32_t s_cyclesPerUs = 1u;
+
+static void MicroClock_Init(void) {
+  CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+  DWT->CYCCNT = 0u;
+  DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+
+  s_cyclesPerUs = SystemCoreClock / 1000000u;
+  if (s_cyclesPerUs == 0u) {
+    s_cyclesPerUs = 1u; /* never divide by zero if the clock is unset */
+  }
+}
+
+/* Truncates to 16 bits on purpose. The field wraps every 65.536 ms, which is
+ * 65 telemetry periods -- so consecutive samples are never ambiguous and the
+ * Pi can unwrap it the same way it unwraps the encoder. */
+static uint16_t MicroClock_Now_u16(void) {
+  return (uint16_t)((DWT->CYCCNT / s_cyclesPerUs) & 0xFFFFu);
+}
 
 void CAN_Driver_Init(FDCAN_HandleTypeDef* hfdcan) {
   s_hfdcan = hfdcan;
 
-  /* Manually enable NVIC for FDCAN1_IT0 -- CubeMX codegen isn't emitting
-     this despite .ioc having it correctly configured (verified in raw .ioc). */
-  HAL_NVIC_SetPriority(FDCAN1_IT0_IRQn, 0, 0);
+  /* Before anything can be timestamped. Cheap and idempotent. */
+  MicroClock_Init();
+
+  /* PRIORITY 5, DELIBERATELY LOW -- do not raise this.
+   *
+   * This used to be (0, 0), the highest preemption priority on the chip,
+   * which put it ABOVE the 16 kHz FOC current loop (ADC1_2_IRQn at
+   * priority 2, main.c). Under NVIC_PRIORITYGROUP_3 a lower number wins, so
+   * every arriving SET_IQ preempted TSK_HighFrequencyTask() mid-computation
+   * to run a handler that does nothing more urgent than set a bool. Textbook
+   * priority inversion: the hard-real-time task was interruptible by the
+   * soft one.
+   *
+   * There is no latency argument for keeping it high. The callback does not
+   * act on commands -- it latches them into s_cmd, and they are applied by
+   * CAN_ProcessPendingMessages() from the 1 kHz medium-frequency hook. A
+   * command therefore waits up to 1 ms to take effect no matter what this
+   * number is, so ISR latency of tens of microseconds is invisible.
+   *
+   * 5 sits below the FOC loop (2), below TIM1_BRK (4) and below SysTick
+   * (TICK_INT_PRIORITY, 4), and above nothing that matters.
+   *
+   * The Rx FIFO absorbs the added delay with room to spare -- see the
+   * overflow budget in HAL_FDCAN_RxFifo0Callback().
+   *
+   * Set here as well as in HAL_FDCAN_MspInit() (and the .ioc that generates
+   * it) because MspInit runs first, during HAL_FDCAN_Init(); this call is
+   * what actually takes effect. Keep all three in agreement -- if Workbench
+   * regenerates msp.c from a stale .ioc, this line is the backstop. */
+  HAL_NVIC_SetPriority(FDCAN1_IT0_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(FDCAN1_IT0_IRQn);
 
   FDCAN_FilterTypeDef filt = {0};
@@ -75,7 +139,28 @@ void CAN_Driver_Init(FDCAN_HandleTypeDef* hfdcan) {
   }
 }
 
-/* Overrides the HAL weak callback -- fires in ISR context on new message */
+/* Overrides the HAL weak callback -- fires in ISR context on new message.
+ *
+ * DRAINS THE FIFO IN A LOOP. This is not defensive padding; reading a single
+ * message here is incorrect. HAL_FDCAN_IRQHandler() clears the RF0N (new
+ * message) flag BEFORE invoking this callback, and RF0N is a single bit, not
+ * a count. So if two frames are already queued when this runs, reading one
+ * leaves the other stranded: no new arrival means no new interrupt, and the
+ * FIFO stays one message behind forever -- every command applied is the
+ * PREVIOUS one, and a third arrival overflows. Draining to the fill level
+ * makes the handler correct regardless of how long it was held off.
+ *
+ * OVERFLOW BUDGET, now that this runs below the FOC loop:
+ *   Rx FIFO 0 holds 3 elements (SRAMCAN_RF0_NBR, fixed in the G4's message
+ *   RAM layout). The longest this handler can be held off is one execution
+ *   of the 16 kHz FOC ISR, which must itself fit inside 62.5 us. Filling 3
+ *   slots needs 3 frames back to back; the shortest command frame (START,
+ *   zero data bytes) occupies ~50 us of wire time at 1 Mbit/s and SET_IQ
+ *   ~80 us, so 3 of them take >=150 us to arrive. 150 us of buffer against
+ *   <62.5 us of worst-case starvation, and that is the adversarial case --
+ *   the Pi actually sends commands at a few hundred Hz, milliseconds apart.
+ *   Losing a frame to priority is not a realistic failure mode here.
+ */
 void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef* hfdcan,
                                uint32_t RxFifo0ITs) {
   g_fdcanCallbackHits++;
@@ -85,36 +170,37 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef* hfdcan,
   FDCAN_RxHeaderTypeDef rxHeader;
   uint8_t rxData[8];
 
-  if (HAL_FDCAN_GetRxMessage(hfdcan, FDCAN_RX_FIFO0, &rxHeader, rxData) !=
-      HAL_OK) {
-    return;
-  }
-
-  /* Only this node's IDs pass the RX filter configured above, so no
-     explicit node-base check is needed here -- the filter already
-     guarantees rxHeader.Identifier belongs to CAN_NODE_BASE. */
-  switch (rxHeader.Identifier) {
-    case CAN_ID_START(CAN_NODE_BASE):
-      s_cmd.start_pending = true;
-      break;
-    case CAN_ID_STOP(CAN_NODE_BASE):
-      s_cmd.stop_pending = true;
-      break;
-    case CAN_ID_SET_IQ(CAN_NODE_BASE): {
-      float iq;
-      memcpy((void*)&iq, rxData,
-             sizeof(float)); /* float LE, per your protocol */
-      s_cmd.iq_value = iq;
-      s_cmd.iq_pending = true;
+  while (HAL_FDCAN_GetRxFifoFillLevel(hfdcan, FDCAN_RX_FIFO0) > 0U) {
+    if (HAL_FDCAN_GetRxMessage(hfdcan, FDCAN_RX_FIFO0, &rxHeader, rxData) !=
+        HAL_OK) {
       break;
     }
-    default:
-      break; /* shouldn't happen given filter, but stay defensive */
+
+    /* Only this node's IDs pass the RX filter configured above, so no
+       explicit node-base check is needed here -- the filter already
+       guarantees rxHeader.Identifier belongs to CAN_NODE_BASE. */
+    switch (rxHeader.Identifier) {
+      case CAN_ID_START(CAN_NODE_BASE):
+        s_cmd.start_pending = true;
+        break;
+      case CAN_ID_STOP(CAN_NODE_BASE):
+        s_cmd.stop_pending = true;
+        break;
+      case CAN_ID_SET_IQ(CAN_NODE_BASE): {
+        float iq;
+        memcpy((void*)&iq, rxData,
+               sizeof(float)); /* float LE, per your protocol */
+        s_cmd.iq_value = iq;
+        s_cmd.iq_pending = true;
+        break;
+      }
+      default:
+        break; /* shouldn't happen given filter, but stay defensive */
+    }
   }
 
-  /* Re-arm notification if your MCU/HAL version requires it after each RX --
-     check your HAL version's FDCAN interrupt handling; some auto-rearm, some
-     don't. */
+  /* No re-arm needed: FDCAN_IT_RX_FIFO0_NEW_MESSAGE stays enabled in IE
+     across interrupts. HAL_FDCAN_IRQHandler() clears only the IR flag. */
 }
 
 /* Called from MC_APP_PostMediumFrequencyHook_M1, NOT from ISR context */
@@ -151,75 +237,54 @@ void CAN_SendTelemetry(void) {
 
   qd_f_t iqd = MC_GetIqdMotor1_F(); /* .q = torque-producing current, .d = 0 in
                                        your control scheme */
-  int16_t elAngle = MC_GetElAngledppMotor1(); /* electrical angle, DPP format */
-  uint32_t encCount =
-      __HAL_TIM_GET_COUNTER(&htim4); /* raw mechanical position from encoder */
 
-  /* Conditioned Iq, accumulated by IqTelem_UpdateHF() at 16 kHz. Scaled here
-   * with the same factor MCI_GetIqd_F() applies, so all three values below
-   * are in Amps and overlay directly on one plot. Reading it from the live
-   * scaleParams_M1 rather than recomputing from RSHUNT/AMPLIFICATION_GAIN
-   * means a future gain change has exactly one place to edit.
-   *
-   * GetMeanAndReset must be called once per telemetry period and no more --
-   * it clears the accumulator. */
-  float const iqScale = scaleParams_M1.current;
-  float const iqEwma = IqTelem_GetEwma() * iqScale;
-  float const iqMean = IqTelem_GetMeanAndReset() * iqScale;
+  /* uint16, not the uint32 this used to be. TIM4's ARR is M1_PULSE_NBR
+     (= 4*PPR - 1 = 3999), so the counter spans 0..3999 and the top two bytes
+     were always zero -- they now carry the timestamp instead. */
+  uint16_t encCount = (uint16_t)__HAL_TIM_GET_COUNTER(&htim4);
 
-  /* HARD LIMIT: exactly three frames may be queued here, no more.
-   *
-   * The STM32G4 FDCAN message RAM has a fixed layout and SRAMCAN_TFQ_NBR is
-   * hardcoded to 3 (stm32g4xx_hal_fdcan.c) -- three Tx elements, not
-   * configurable. An element stays occupied until its frame has finished on
-   * the wire, and an 8-byte standard frame at 1 Mbit/s takes ~115 us while
-   * queuing all of them takes a few us. So a fourth offer always arrives
-   * with TFQF still set and HAL_FDCAN_AddMessageToTxFifoQ returns HAL_ERROR
-   * immediately (see its TFQF check). The fourth frame is not delayed, it is
-   * dropped, every single 1 kHz cycle.
-   *
-   * That is exactly what a previous version of this function did: it queued
-   * IQ_READBACK, IQ_MEAN, ELEC_ANGLE, ENC_COUNT and silently lost ENC_COUNT
-   * on every cycle, taking position feedback on the Pi with it. Adding a
-   * fourth frame was what tipped it over -- the original three fit exactly.
-   *
-   * ELEC_ANGLE is therefore folded into the IQ_MEAN frame rather than being
-   * sent separately: it is only 2 bytes, and IQ_MEAN had 4 spare. The
-   * standalone 0x013 ID is retired. If you ever need another signal, pack it
-   * into the spare bytes below -- do not add a frame. */
+  /* Sampled here, next to the values it describes, so it dates the payload
+     and not the moment the frame won arbitration. */
+  uint16_t tstamp_us = MicroClock_Now_u16();
 
-  /* Bytes 0..3 raw (untouched, as before), 4..7 EWMA. Widening this frame is
-   * backward compatible: can_interface.py matches on len(data) >= 4 and
-   * slices [:4], so a consumer that only wants the raw value is unaffected. */
-  uint8_t iqPayload[8];
-  memcpy(&iqPayload[0], &iqd.q, sizeof(float));
-  memcpy(&iqPayload[4], &iqEwma, sizeof(float));
+  /* The 16 kHz conditioned-Iq accumulator (IqTelem_UpdateHF) is still
+     running and must still be drained exactly once per telemetry period --
+     GetMeanAndReset clears it, and left uncalled the sum grows without bound
+     and loses float precision. Its result is no longer transmitted: nothing
+     on the Pi ever read iq_mean or iq_ewma, and the merged frame has no room
+     for them. The accumulator is kept rather than ripped out because
+     IqTelem_GetEwma() is the obvious fix if raw Iq proves too noisy to
+     teleoperate on -- swapping iqd.q below for IqTelem_GetEwma() *
+     scaleParams_M1.current is then a one-line change on this side and none
+     at all on the Pi's. */
+  (void)IqTelem_GetMeanAndReset();
 
-  hdr.Identifier = CAN_ID_IQ_READBACK(CAN_NODE_BASE);
+  /* ONE frame per tick. The three-Tx-element limit that used to dominate
+   * this function (SRAMCAN_TFQ_NBR is hardcoded to 3 in
+   * stm32g4xx_hal_fdcan.c, so a fourth frame offered in the same cycle is
+   * dropped outright rather than delayed) no longer binds -- but the reason
+   * it is gone is that the frame count came down, not that the limit did.
+   *
+   * Everything the Pi actually reads is Iq and the encoder count, and both
+   * fit in 8 bytes alongside the timestamp. Sending them together is not
+   * only cheaper (two nodes at 1 kHz: 6000 frames/s -> 2000, and one Pi-side
+   * interrupt per tick instead of three) -- it also makes the two signals
+   * share a single timestamp by construction. They previously arrived in
+   * separate frames whose relative delay nothing controlled, so any
+   * controller reading position and current together had a skew it could
+   * neither measure nor bound. That skew is now structurally zero.
+   *
+   * Layout must stay in lockstep with CAN_ID_TELEM's comment in
+   * can_driver.h and _handle_message() in can_interface.py. */
+  uint8_t payload[8];
+  memcpy(&payload[0], &iqd.q, sizeof(float));
+  memcpy(&payload[4], &encCount, sizeof(uint16_t));
+  memcpy(&payload[6], &tstamp_us, sizeof(uint16_t));
+
+  hdr.Identifier = CAN_ID_TELEM(CAN_NODE_BASE);
   hdr.DataLength = FDCAN_DLC_BYTES_8;
-  if (HAL_FDCAN_AddMessageToTxFifoQ(s_hfdcan, &hdr, iqPayload) != HAL_OK) {
-    s_iqTxDropCount++;
-  }
-
-  /* Bytes 0..3 boxcar mean, 4..5 electrical angle (DPP). 2 bytes spare. */
-  uint8_t meanPayload[6];
-  memcpy(&meanPayload[0], &iqMean, sizeof(float));
-  memcpy(&meanPayload[4], &elAngle, sizeof(int16_t));
-
-  hdr.Identifier = CAN_ID_IQ_MEAN(CAN_NODE_BASE);
-  hdr.DataLength = FDCAN_DLC_BYTES_6;
-  if (HAL_FDCAN_AddMessageToTxFifoQ(s_hfdcan, &hdr, meanPayload) != HAL_OK) {
-    s_iqMeanTxDropCount++;
-  }
-
-  /* Last of the three, so it is the one that suffers if the invariant above
-   * is ever violated again -- and it is the one that matters most. Keep it
-   * last only while the count is 3. */
-  hdr.Identifier = CAN_ID_ENC_COUNT(CAN_NODE_BASE);
-  hdr.DataLength = FDCAN_DLC_BYTES_4;
-  if (HAL_FDCAN_AddMessageToTxFifoQ(s_hfdcan, &hdr, (uint8_t*)&encCount) !=
-      HAL_OK) {
-    s_encTxDropCount++;
+  if (HAL_FDCAN_AddMessageToTxFifoQ(s_hfdcan, &hdr, payload) != HAL_OK) {
+    s_telemTxDropCount++;
   }
 }
 

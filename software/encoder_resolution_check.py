@@ -4,7 +4,7 @@ Encoder resolution check.
 Verifies the assumed ENC_PULSE_NBR = 4000 (counts per mechanical
 revolution) by having you manually rotate the shaft a known number of
 full revolutions and comparing against the measured unwrapped delta.
-This assumption feeds directly into EncoderUnwrapper's wrap detection
+This assumption feeds directly into WrappingCounter's wrap detection
 -- if it's wrong, you'd see spurious jumps in enc_count_unwrapped right
 at wrap boundaries, which could look like control instability even with
 a correct control law.
@@ -15,7 +15,7 @@ Procedure:
      completed exactly one full revolution.
   2. Run this script. It captures a baseline position, then waits for
      you to rotate the shaft by hand.
-  3. Rotate SLOWLY (to avoid EncoderUnwrapper misdetecting wrap
+  3. Rotate SLOWLY (to avoid WrappingCounter misdetecting wrap
      direction -- it assumes consecutive samples never differ by more
      than half a revolution) through exactly N_REVOLUTIONS full turns,
      always in the same direction, ending back at your mark.

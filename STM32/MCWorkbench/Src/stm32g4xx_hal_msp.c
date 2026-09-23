@@ -517,7 +517,12 @@ void HAL_FDCAN_MspInit(FDCAN_HandleTypeDef* hfdcan)
     HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
     /* FDCAN1 interrupt Init */
-    HAL_NVIC_SetPriority(FDCAN1_IT0_IRQn, 0, 0);
+    /* Priority 5, not 0: this must stay BELOW the 16 kHz FOC current loop
+       (ADC1_2_IRQn, priority 2). Generated from the .ioc -- change it there
+       (NVIC.FDCAN1_IT0_IRQn), not here, or the next MotorControl Workbench
+       regeneration puts 0 back. can_driver.c re-asserts 5 after this runs,
+       which is the backstop if that happens. See CAN_Driver_Init(). */
+    HAL_NVIC_SetPriority(FDCAN1_IT0_IRQn, 5, 0);
     HAL_NVIC_EnableIRQ(FDCAN1_IT0_IRQn);
     /* USER CODE BEGIN FDCAN1_MspInit 1 */
 

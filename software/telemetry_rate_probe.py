@@ -17,10 +17,14 @@ before changing any code:
   1. The USB-CAN adapter (this bus is gs_usb over USB, per
      `ip -d link show can0`) batching frames into URBs.
   2. Python/GIL cost: can_interface.py USED TO open one unfiltered socket
-     per motor, so both RX threads parsed all ~6000 frames/s. This was the
-     real cause; see below.
-  3. Firmware TX FIFO drops: CAN_SendTelemetry() queues IQ -> ANGLE ->
-     ENC, so ENC_COUNT is dropped first when the FIFO is full.
+     per motor, so both RX threads parsed every frame twice. This was the
+     real cause; see below. The merged TELEM frame cut the underlying rate
+     from ~6000 frames/s to ~2000, so historical logs are not comparable.
+  3. Firmware TX FIFO drops: CAN_SendTelemetry() used to queue IQ -> MEAN
+     -> ENC into three Tx elements, so ENC_COUNT was the one dropped when
+     the FIFO was full. It now sends a single merged TELEM frame, so there
+     is nothing left to drop first -- a drop is now total, and visible as a
+     rate shortfall rather than as one silently missing signal.
 
 WHAT IT MEASURES
 Three configurations, back to back, each for RUN_DURATION_S:
@@ -28,8 +32,9 @@ Three configurations, back to back, each for RUN_DURATION_S:
   (a) TWO unfiltered buses + two RX threads -- reproduces what
       can_interface.py did BEFORE the shared-socket change (kept as the
       control case: it is the arrangement whose cost this probe measured).
-  (b) ONE bus filtered to the two ENC_COUNT IDs + one RX thread -- the
-      cheapest possible Python path.
+  (b) ONE bus filtered to the two TELEM IDs + one RX thread -- the
+      cheapest possible Python path. Since the frame merge there is much
+      less for a filter to discard, so this should now sit close to (a).
   (c) Two MotorCANInterface instances polled from a 200 Hz loop -- teleop's
       real path end to end, reporting the same fresh-sample fraction that
       teleop_test.py logs as fresh_a/fresh_b. Since the shared-socket change
@@ -112,9 +117,7 @@ import can
 
 from can_interface import (
     MotorCANInterface,
-    OFFSET_ENC_COUNT,
-    OFFSET_IQ_MEAN,
-    OFFSET_IQ_READBACK,
+    OFFSET_TELEM,
 )
 
 NODE_BASE_A = 0x000
@@ -133,15 +136,16 @@ EXPECTED_RATE_HZ = 1000.0
 
 LOG_DIR = "logs"
 
+# One telemetry frame per node now: IQ_READBACK, IQ_MEAN, ELEC_ANGLE and
+# ENC_COUNT were merged into TELEM, so a node contributes 1000 frames/s here
+# rather than 3000. Rates measured by this probe are NOT comparable to runs
+# logged before that change -- the per-frame costs it measures are unchanged,
+# there are simply a third as many frames to pay them on.
 TELEMETRY_IDS = {}
 for _base, _tag in ((NODE_BASE_A, "A"), (NODE_BASE_B, "B")):
-    TELEMETRY_IDS[_base + OFFSET_IQ_READBACK] = f"IQ_READBACK {_tag}"
-    # IQ_MEAN also carries ELEC_ANGLE in bytes 4..5; the standalone 0x013
-    # ELEC_ANGLE frame was retired (only 3 FDCAN Tx elements on the G4).
-    TELEMETRY_IDS[_base + OFFSET_IQ_MEAN] = f"IQ_MEAN {_tag}"
-    TELEMETRY_IDS[_base + OFFSET_ENC_COUNT] = f"ENC_COUNT {_tag}"
+    TELEMETRY_IDS[_base + OFFSET_TELEM] = f"TELEM {_tag}"
 
-ENC_IDS = (NODE_BASE_A + OFFSET_ENC_COUNT, NODE_BASE_B + OFFSET_ENC_COUNT)
+TELEM_IDS = (NODE_BASE_A + OFFSET_TELEM, NODE_BASE_B + OFFSET_TELEM)
 
 
 class Collector:
@@ -456,12 +460,14 @@ def main():
         )))
 
         # (b) Cheapest possible Python path: the kernel drops everything but
-        # the two ENC_COUNT IDs, so nothing else is ever parsed.
-        enc_filters = [{"can_id": i, "can_mask": 0x7FF} for i in ENC_IDS]
+        # the two TELEM IDs, so nothing else is ever parsed. With the frames
+        # merged this is much closer to config (a) than it used to be --
+        # there is far less left for a filter to discard.
+        telem_filters = [{"can_id": i, "can_mask": 0x7FF} for i in TELEM_IDS]
         results.append(("b", *run_config(
             "b",
-            "one bus filtered to ENC_COUNT only + one RX thread",
-            [{"can_filters": enc_filters}],
+            "one bus filtered to TELEM only + one RX thread",
+            [{"can_filters": telem_filters}],
             parse_all=False,
         )))
     except KeyboardInterrupt:
@@ -483,10 +489,10 @@ def main():
     except KeyboardInterrupt:
         print("\nInterrupted.")
 
-    enc_a = [len(c.kernel_times.get((0, ENC_IDS[0]), [])) / w
+    enc_a = [len(c.kernel_times.get((0, TELEM_IDS[0]), [])) / w
              for _l, c, w, _lb, _la in results]
     if len(enc_a) == 2:
-        print(f"\nENC_COUNT A on socket 0: config (a) {enc_a[0]:.0f}/s vs "
+        print(f"\nTELEM A on socket 0: config (a) {enc_a[0]:.0f}/s vs "
               f"config (b) {enc_a[1]:.0f}/s (expected {EXPECTED_RATE_HZ:.0f}/s).")
         print("Compare the handling-lag columns too: a rate that looks fine but a"
               " p99 lag of\nmany ms is still a control-loop latency problem, and it"

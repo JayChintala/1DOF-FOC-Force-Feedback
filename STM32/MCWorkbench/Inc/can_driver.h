@@ -31,28 +31,48 @@
 #define CAN_ID_START(base) ((base) + 0x001)
 #define CAN_ID_STOP(base) ((base) + 0x002)
 #define CAN_ID_SET_IQ(base) ((base) + 0x003)
-#define CAN_ID_IQ_READBACK(base) ((base) + 0x010)
-#define CAN_ID_IQ_MEAN(base) ((base) + 0x011)
-#define CAN_ID_ENC_COUNT(base) ((base) + 0x014)
+#define CAN_ID_TELEM(base) ((base) + 0x012)
 
-/* 0x013 (ELEC_ANGLE) is retired -- the electrical angle now travels in bytes
- * 4..5 of the IQ_MEAN frame. See the hard three-frame limit documented in
- * CAN_SendTelemetry(): the G4 has only 3 FDCAN Tx elements, so a fourth
- * frame is dropped on every cycle rather than delayed. Pack new signals into
- * the spare payload bytes; do not add an ID. */
+/* TELEM payload, 8 bytes, little-endian -- everything the Pi reads, in one
+ * frame per 1 kHz tick:
+ *   [0..3] float32  Iq, Amps (MC_GetIqdMotor1_F().q -- raw, unfiltered)
+ *   [4..5] uint16   raw TIM4 encoder count, 0..3999 (wraps at M1_PULSE_NBR)
+ *   [6..7] uint16   MCU timestamp, microseconds, free-running, wraps at 65536
+ *
+ * 0x010 (IQ_READBACK), 0x011 (IQ_MEAN), 0x013 (ELEC_ANGLE) and 0x014
+ * (ENC_COUNT) are ALL retired. Previously this node sent three frames per
+ * tick; two motors at 1 kHz put 6000 frames/s on the wire and cost the Pi an
+ * interrupt each. Iq and the encoder count are the only signals anything
+ * actually reads, and together they fit one frame -- so one frame is what
+ * gets sent.
+ *
+ * WHY A NEW ID (0x012) RATHER THAN REUSING 0x010: the old 0x010 also began
+ * with a float32 Iq, so a node still running pre-merge firmware would look
+ * valid to the new parser while bytes 4..7 (which used to be the Iq EWMA)
+ * got decoded as an encoder count and a timestamp -- plausible-looking
+ * garbage. A retired ID makes a half-flashed bus go silent instead, which is
+ * a failure you notice. Do not recycle 0x010/0x011/0x013/0x014.
+ *
+ * Bytes 4..5 hold the encoder count as uint16 (not the uint32 it used to be)
+ * because the counter only ever spans 0..3999; that is what buys the two
+ * bytes the timestamp needs. Both fields wrap, and both are unwrapped on the
+ * Pi -- see WrappingCounter in can_interface.py, which handles both.
+ *
+ * The three-Tx-element limit documented in CAN_SendTelemetry() is no longer
+ * binding at one frame, but it has not gone away. If you add a signal, pack
+ * it into a spare byte of an existing frame; do not add an ID. */
 
 /* ---- Public API ---- */
 void CAN_Driver_Init(FDCAN_HandleTypeDef* hfdcan);
 void CAN_ProcessPendingMessages(void);
 void CAN_SendTelemetry(void);
 
-/* Tx-FIFO-full drop counters, incremented in CAN_SendTelemetry() when
- * HAL_FDCAN_AddMessageToTxFifoQ() fails for that message. Not currently
- * exposed via the MC register interface -- see MC_REG_SECTOR in
- * sync_registers.c for the pattern if that's added later. */
-uint32_t CAN_GetIqTxDropCount(void);
-uint32_t CAN_GetIqMeanTxDropCount(void);
-uint32_t CAN_GetEncTxDropCount(void);
+/* Tx-FIFO-full drop counter, incremented in CAN_SendTelemetry() when
+ * HAL_FDCAN_AddMessageToTxFifoQ() fails. Not currently exposed via the MC
+ * register interface -- see MC_REG_SECTOR in sync_registers.c for the
+ * pattern if that's added later. One counter, because there is now one
+ * telemetry frame. */
+uint32_t CAN_GetTelemTxDropCount(void);
 
 /* ---- Iq telemetry conditioning ----
  * Defined in the USER CODE blocks of mc_tasks_foc.c, because that is where
