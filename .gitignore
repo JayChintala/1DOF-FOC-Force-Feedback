@@ -59,6 +59,16 @@ STM32/MCWorkbench/STM32CubeIDE/Debug*/
 STM32/MCWorkbench/STM32CubeIDE/Release*/
 STM32/MCWorkbench/STM32CubeIDE/.settings/
 
+# ESC_based: same rules for its copy of the firmware project
+ESC_based/STM32/MCWorkbench/Drivers/
+ESC_based/STM32/MCWorkbench/MCSDK*/
+ESC_based/STM32/MCWorkbench/EWARM/
+ESC_based/STM32/MCWorkbench/.mxproject
+ESC_based/STM32/MCWorkbench/STM32CubeIDE/Debug*/
+ESC_based/STM32/MCWorkbench/STM32CubeIDE/Release*/
+ESC_based/STM32/MCWorkbench/STM32CubeIDE/.settings/
+ESC_based/software/__pycache__/
+
 # Logs and temp files
 *.log
 *.settings
