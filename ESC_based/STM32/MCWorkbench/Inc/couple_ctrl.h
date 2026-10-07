@@ -38,6 +38,19 @@
 #define COUPLE_MODE_HOLD 1u
 #define COUPLE_MODE_PEER 2u
 
+/* ---- COUPLE_MODE flags (optional second payload byte) ----
+ * PREDICT: in PEER mode, couple to where the peer shaft is NOW --
+ * peer_pos + peer_vel * (its age + wire time) -- instead of to its last
+ * received position. A spring on a delayed position behaves like a spring
+ * plus NEGATIVE damping that grows with Kp; that is what makes the pair
+ * buzz hands-off at stiffnesses one motor holds quietly. The age is measured
+ * per frame, so this also tracks the 0-1 ms drift between the two ESCs'
+ * unsynchronised 1 kHz ticks. */
+#define COUPLE_FLAG_PREDICT (1u << 0)
+#define COUPLE_PREDICT_WIRE_US 130u     /* 8-byte frame at 1 Mbit/s, before
+                                           the Rx stamp; not in the age */
+#define COUPLE_PREDICT_MAX_US 3000u     /* never extrapolate further */
+
 /* ---- Defaults, used from boot until the Pi sends COUPLE_GAINS/LOCAL ----
  * Starting point: the gains position_mirror_test.py runs stably on the Pi.
  * Once bench tuning settles, bake the results in here so the pair couples
@@ -133,7 +146,7 @@ void Couple_Tick(const CAN_TickSample_t* s);
 
 bool Couple_SetGains(float kp, float kd);         /* false = rejected */
 bool Couple_SetLocal(float kd_local, float iq_max);
-void Couple_RequestMode(uint8_t mode);
+void Couple_RequestMode(uint8_t mode, uint8_t flags); /* COUPLE_FLAG_* */
 void Couple_SetDirectIq(float amps);
 
 void Couple_GetStatus(Couple_Status_t* out);

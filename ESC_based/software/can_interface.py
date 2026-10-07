@@ -14,7 +14,8 @@ ESC_based/STM32/MCWorkbench/Inc/can_driver.h):
                                       firmware zeroes the current.
     base+0x004 COUPLE_GAINS  Pi->MCU  float32 Kp [A/count], float32 Kd [A/(count/s)]
     base+0x005 COUPLE_LOCAL  Pi->MCU  float32 Kd_local [A/(count/s)], float32 Iq_max [A]
-    base+0x006 COUPLE_MODE   Pi->MCU  uint8 mode: 0 off, 1 hold, 2 peer
+    base+0x006 COUPLE_MODE   Pi->MCU  uint8 mode: 0 off, 1 hold, 2 peer;
+                                      optional uint8 flags (bit 0 = predict)
     base+0x012 TELEM         MCU->Pi  8 bytes LE, once per 1 kHz firmware tick:
                                [0..3] float32 Iq, Amps (raw, unfiltered)
                                [4..5] uint16  raw TIM4 count, 0..3999
@@ -62,6 +63,8 @@ OFFSET_DBG = 0x100 + OFFSET_TELEM
 COUPLE_MODE_OFF = 0
 COUPLE_MODE_HOLD = 1
 COUPLE_MODE_PEER = 2
+COUPLE_FLAG_PREDICT = 1 << 0  # PEER mode: couple to the peer's predicted
+                              # position now, not its ~1 ms-old sample
 
 # DBG status byte -- COUPLE_STATUS_* in couple_ctrl.h.
 STATUS_RUN = 1 << 0        # motor state machine in RUN
@@ -422,9 +425,10 @@ class MotorCANInterface:
         """Kd_local in A/(count/s); Iq_max in A, capped at 0.8 A by the ESC."""
         self._send(self._id_couple_local, struct.pack("<ff", kd_local, iq_max))
 
-    def send_couple_mode(self, mode: int):
-        """COUPLE_MODE_OFF / _HOLD / _PEER. Re-sending a mode re-zeroes it."""
-        self._send(self._id_couple_mode, struct.pack("<B", mode))
+    def send_couple_mode(self, mode: int, flags: int = 0):
+        """COUPLE_MODE_OFF / _HOLD / _PEER, plus COUPLE_FLAG_* bits.
+        Re-sending a mode re-zeroes it."""
+        self._send(self._id_couple_mode, struct.pack("<BB", mode, flags))
 
     # ---- telemetry (MCU -> Pi) ----
     def _handle_message(self, msg: "can.Message"):

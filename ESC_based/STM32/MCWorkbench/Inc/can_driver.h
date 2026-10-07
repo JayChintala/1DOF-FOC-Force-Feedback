@@ -77,6 +77,8 @@
  *   base+0x005 COUPLE_LOCAL   float32 Kd_local [A/(count/s)], float32 Iq_max [A]
  *   base+0x006 COUPLE_MODE    uint8 mode: 0 off (direct SET_IQ), 1 hold,
  *                             2 peer. Sending a mode again re-zeroes it.
+ *                             Optional uint8 flags: COUPLE_FLAG_* in
+ *                             couple_ctrl.h (bit 0 = predict peer).
  *
  * TELEM payload, 8 bytes, little-endian -- everything the Pi reads, in one
  * frame per 1 kHz tick. The PEER ESC reads it too: bytes 4..7 are what

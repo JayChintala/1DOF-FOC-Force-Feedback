@@ -28,7 +28,8 @@ import os
 import sys
 import time
 
-from can_interface import (COUPLE_MODE_HOLD, COUPLE_MODE_OFF, COUPLE_MODE_PEER,
+from can_interface import (COUPLE_FLAG_PREDICT, COUPLE_MODE_HOLD,
+                           COUPLE_MODE_OFF, COUPLE_MODE_PEER,
                            PEER_AGE_SATURATED_MS, TRIP_NAMES, MotorCANInterface,
                            decode_status)
 from plot_coupling import plot_coupling_log
@@ -70,6 +71,9 @@ def parse_args():
     p.add_argument("--kd", type=float, default=KD, help="A/(count/s)")
     p.add_argument("--kd-local", type=float, default=KD_LOCAL, help="A/(count/s)")
     p.add_argument("--iq-max", type=float, default=IQ_MAX_A, help="A, <= 0.8")
+    p.add_argument("--predict", action="store_true",
+                   help="peer mode: compensate the ~1-2 ms bus delay by "
+                        "predicting the other shaft's position")
     p.add_argument("--duration", type=float, default=RUN_DURATION_S,
                    help="seconds; 0 = until Ctrl+C")
     p.add_argument("--channel", default="can0")
@@ -82,6 +86,8 @@ def parse_args():
         p.error("gains must be >= 0 (a negative gain is positive feedback)")
     if not 0 < args.iq_max <= 0.8:
         p.error("--iq-max must be in (0, 0.8]")
+    if args.predict and args.mode != "peer":
+        p.error("--predict only applies to --mode peer")
     if args.mode == "peer" and args.motors != "both":
         p.error("--motors only applies to --mode hold; peer always uses both")
     return args
@@ -203,7 +209,8 @@ def main():
     os.makedirs(LOG_DIR, exist_ok=True)
     who = "" if args.mode == "peer" else f"_{''.join(names)}"
     base_name = (f"coupling_{args.mode}{who}_KP{args.kp:g}_KD{args.kd:g}"
-                 f"_KDL{args.kd_local:g}_A{args.iq_max:g}")
+                 f"_KDL{args.kd_local:g}_A{args.iq_max:g}"
+                 f"{'_PRED' if args.predict else ''}")
     log_path = unique_log_path(base_name)
 
     ifaces = {n: MotorCANInterface(channel=args.channel, bustype=args.interface,
@@ -245,7 +252,7 @@ def main():
 
         print(f"Mode {args.mode} on ESC {'+'.join(names)}:  Kp={args.kp:g} A/count  "
               f"Kd={args.kd:g}  Kd_local={args.kd_local:g} A/(count/s)  "
-              f"Iq_max={args.iq_max:g} A")
+              f"Iq_max={args.iq_max:g} A" + ("  predict=on" if args.predict else ""))
         print("Sending START...")
         for iface in ifaces.values():
             iface.send_start()
@@ -260,7 +267,7 @@ def main():
         print("Hands off -- engaging once " +
               ("the shaft is still..." if len(names) == 1 else "both shafts are still..."))
         for iface in ifaces.values():
-            iface.send_couple_mode(mode)
+            iface.send_couple_mode(mode, COUPLE_FLAG_PREDICT if args.predict else 0)
         if not wait_for(lambda: all(i.get_debug().get("engaged") for i in ifaces.values()),
                         ENGAGE_TIMEOUT_S):
             for n, i in ifaces.items():
@@ -329,6 +336,7 @@ def main():
             config = {
                 "mode": args.mode, "motors": names, "kp": args.kp, "kd": args.kd,
                 "kd_local": args.kd_local, "iq_max": args.iq_max,
+                "predict": args.predict,
                 "duration_s": args.duration, "trip": trip_msg,
                 "started": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t_start)),
             }

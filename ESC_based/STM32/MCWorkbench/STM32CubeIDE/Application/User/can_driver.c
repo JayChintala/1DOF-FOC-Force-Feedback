@@ -49,6 +49,7 @@ typedef struct {
   volatile float iq_max;
   volatile bool mode_pending;
   volatile uint8_t mode;
+  volatile uint8_t mode_flags;
 } CAN_CmdState_t;
 
 static volatile CAN_CmdState_t s_cmd = {0};
@@ -309,6 +310,9 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef* hfdcan,
         if (rxHeader.DataLength == FDCAN_DLC_BYTES_0) break;
         s_cmd.mode_pending = false;
         s_cmd.mode = rxData[0];
+        /* Optional flags byte; a 1-byte frame means no flags. */
+        s_cmd.mode_flags =
+            (rxHeader.DataLength >= FDCAN_DLC_BYTES_2) ? rxData[1] : 0u;
         s_cmd.mode_pending = true;
         break;
       case CAN_ID_TELEM(CAN_PEER_BASE): {
@@ -372,8 +376,9 @@ void CAN_ProcessPendingMessages(void) {
   }
   if (s_cmd.mode_pending) {
     uint8_t const mode = s_cmd.mode;
+    uint8_t const flags = s_cmd.mode_flags;
     s_cmd.mode_pending = false;
-    Couple_RequestMode(mode);
+    Couple_RequestMode(mode, flags);
   }
   if (s_cmd.iq_pending) {
     float const iq = s_cmd.iq_value;
@@ -384,7 +389,7 @@ void CAN_ProcessPendingMessages(void) {
   }
   if (s_cmd.stop_pending) {
     s_cmd.stop_pending = false;
-    Couple_RequestMode(COUPLE_MODE_OFF);
+    Couple_RequestMode(COUPLE_MODE_OFF, 0u);
     MC_StopMotor1();
   }
 }

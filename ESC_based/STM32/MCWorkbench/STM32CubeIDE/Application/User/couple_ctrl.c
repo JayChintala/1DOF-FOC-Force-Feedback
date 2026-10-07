@@ -50,6 +50,7 @@ typedef struct {
   /* req_mode is what was asked for; engaged says whether the law has
      latched its offsets and is actually driving Iq. */
   uint8_t req_mode;
+  bool predict; /* COUPLE_FLAG_PREDICT, latched with the mode request */
   bool engaged;
   int32_t own0;
   int32_t peer0;
@@ -214,6 +215,17 @@ static void RunLaw(bool peer_fresh) {
     err -= s_couple.peer_pos - s_couple.peer0;
     derr -= s_couple.peer_vel;
   }
+  float err_f = (float)err;
+  if (peer && s_couple.predict) {
+    /* peer_age_us is how long ago this frame left the Rx FIFO, on this
+       tick; the wire time before that is fixed. Capped so a stale frame
+       (which trips PEER_TIMEOUT anyway) is never extrapolated far. */
+    uint32_t horizon_us = s_couple.peer_age_us + COUPLE_PREDICT_WIRE_US;
+    if (horizon_us > COUPLE_PREDICT_MAX_US) {
+      horizon_us = COUPLE_PREDICT_MAX_US;
+    }
+    err_f -= s_couple.peer_vel * ((float)horizon_us * 1.0e-6f);
+  }
 
   if ((err > COUPLE_ERR_LIMIT_CNT) || (err < -COUPLE_ERR_LIMIT_CNT)) {
     Disengage(COUPLE_TRIP_ERR_LIMIT);
@@ -226,7 +238,7 @@ static void RunLaw(bool peer_fresh) {
 
   float const iq_max = fminf(s_couple.iq_max, COUPLE_IQ_MAX_CEILING_A);
   float const raw = -COUPLE_TORQUE_SIGN *
-                    (s_couple.kp * (float)err + s_couple.kd * derr +
+                    (s_couple.kp * err_f + s_couple.kd * derr +
                      s_couple.kd_local * s_couple.own_vel);
   float iq = raw;
   if (iq > iq_max) {
@@ -235,7 +247,7 @@ static void RunLaw(bool peer_fresh) {
     iq = -iq_max;
   }
   s_couple.saturated = (iq != raw);
-  s_couple.err = err;
+  s_couple.err = (int32_t)err_f; /* what the law used, predicted or not */
   CommandIq(iq);
 }
 
@@ -324,7 +336,7 @@ bool Couple_SetLocal(float kd_local, float iq_max) {
   return true;
 }
 
-void Couple_RequestMode(uint8_t mode) {
+void Couple_RequestMode(uint8_t mode, uint8_t flags) {
   if (mode == COUPLE_MODE_OFF) {
     if (s_couple.engaged || (s_couple.req_mode != COUPLE_MODE_OFF)) {
       Disengage(COUPLE_TRIP_NONE);
@@ -341,6 +353,7 @@ void Couple_RequestMode(uint8_t mode) {
   Disengage(COUPLE_TRIP_NONE);
   s_couple.trip = COUPLE_TRIP_NONE;
   s_couple.req_mode = mode;
+  s_couple.predict = (flags & COUPLE_FLAG_PREDICT) != 0u;
 }
 
 void Couple_SetDirectIq(float amps) {

@@ -247,7 +247,8 @@ def plot_coupling_log(csv_path, out_path=None):
         title = (f"{cfg['mode']} coupling, ESC {'+'.join(cfg['motors'])}   "
                  f"Kp {cfg['kp']:g} A/count   Kd {cfg['kd']:g}   "
                  f"Kd_local {cfg['kd_local']:g} A/(count/s)   Iq_max {cfg['iq_max']:g} A"
-                 f"\n{os.path.basename(csv_path)}   {cfg.get('started', '')}")
+                 + ("   predict on" if cfg.get("predict") else "")
+                 + f"\n{os.path.basename(csv_path)}   {cfg.get('started', '')}")
     # Trips are named here rather than beside their red line, where the
     # text would collide with the legend or the data.
     for n, tr in trips.items():

@@ -59,6 +59,8 @@ Raise `--kp` step by step and push the shaft each time. Note where it starts to 
 python3 coupling_monitor.py --kp 0.001 --kd 0.00003
 ```
 
+If the pair buzzes with nobody holding the sticks at a Kp one motor holds quietly, that's the 1–2 ms bus delay. Add `--predict`, which makes each ESC couple to where the other shaft is *now* (its last position plus velocity × age), and/or a little `--kd-local`.
+
 Turn one shaft and the other follows. Clamp one and the other locks up, up to the force `Iq_max` gives. `--duration 0` runs until Ctrl+C. Each run writes `logs/coupling_<mode>_KP…csv`, a `.json` with the settings, and a `.png`.
 
 Once you have settled values, put them in as `COUPLE_DEFAULT_*` in `couple_ctrl.h`. The ESCs then start up with them.
