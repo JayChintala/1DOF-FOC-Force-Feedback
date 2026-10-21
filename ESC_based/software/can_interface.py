@@ -347,7 +347,7 @@ class MotorCANInterface:
     """
 
     def __init__(self, channel: str = "can0", bustype: str = "socketcan",
-                 node_base: int = 0x000):
+                 node_base: int = 0x000, pair_dbg: bool = True):
         self._unwrapper = WrappingCounter(ENC_PULSE_NBR)
         self._clock_unwrapper = WrappingCounter(MCU_CLOCK_MODULUS)
         self.node_base = node_base
@@ -380,7 +380,11 @@ class MotorCANInterface:
         self.dbg_time = None
 
         # TELEM waiting for its DBG; emitted on the matching DBG or when the
-        # next TELEM shows none is coming.
+        # next TELEM shows none is coming. With pair_dbg=False every TELEM
+        # record is queued the moment it arrives, DBG fields left None: in
+        # direct mode DBG is only 10 Hz, so pairing holds each record ~1 ms
+        # for a DBG that almost never comes (B1).
+        self._pair_dbg = pair_dbg
         self._pending = None
         self._records = collections.deque(maxlen=RECORD_BUFFER_MAX)
         self.unmatched_dbg = 0
@@ -455,7 +459,8 @@ class MotorCANInterface:
 
             if self._pending is not None:
                 self._records.append(self._pending)  # no DBG this tick
-            self._pending = {
+                self._pending = None
+            record = {
                 "bus_time": msg.timestamp,
                 "mcu_us_raw": mcu_us,
                 "mcu_time_us": self.mcu_time_us,
@@ -463,6 +468,10 @@ class MotorCANInterface:
                 "iq_meas": iq,
                 "iq_cmd": None, "err": None, "flags": None, "peer_age_ms": None,
             }
+            if self._pair_dbg:
+                self._pending = record
+            else:
+                self._records.append(record)
 
     def _handle_dbg(self, msg):
         iq_ma, err, mcu_us, flags, age = struct.unpack("<hhHBB", msg.data)
@@ -475,6 +484,8 @@ class MotorCANInterface:
             self.dbg_peer_age_ms = age_ms
             self.dbg_time = time.time()
 
+            if not self._pair_dbg:
+                return
             pending = self._pending
             if pending is not None and pending["mcu_us_raw"] == mcu_us:
                 pending.update(iq_cmd=iq_cmd, err=err, flags=flags,
@@ -502,6 +513,12 @@ class MotorCANInterface:
                 "mcu_time_us": self.mcu_time_us,
                 "last_rx_time": self.last_rx_time,
                 "enc_count_bus_time": self.enc_count_bus_time,
+                # Aliases for scripts ported from software/ (teleop_test.py).
+                # One TELEM frame carries Iq and position, so the per-signal
+                # parse and kernel stamps there were already equal.
+                "iq_readback_time": self.last_rx_time,
+                "enc_count_time": self.last_rx_time,
+                "iq_readback_bus_time": self.enc_count_bus_time,
             }
 
     def get_debug(self) -> dict:
