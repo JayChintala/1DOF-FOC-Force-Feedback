@@ -1,0 +1,139 @@
+FIRMWARE CHANGES FOR THE DEV MACHINE (ESC_based, both B-G431B-ESC1 boards)
+Written 2026-10-25 on the Pi. Repo branch: tune/current-sensing-gain-16x.
+Context and test results: ESC_based/software/TEST_LOG.md ("Firmware changes"
+section near the top; the B1 and "SD-card write stalls" entries explain why).
+
+===========================================================================
+INSTRUCTIONS FOR THE CLAUDE CODE SESSION
+===========================================================================
+
+Make exactly the two changes below. Do not change anything else.
+
+HARD RULES
+- Hand-edit the source files only. NEVER regenerate code from Motor Control
+  Workbench / STM32CubeMX. The .ioc (ESC_based/STM32/MCWorkbench/MCWorkbench.ioc)
+  still says PGA gain 8x; regenerating would revert the 16x current-sense gain
+  and overwrite the hand-written FDCAN and coupling code.
+- No other edits, refactors, or "while I'm here" fixes.
+- Build both configurations the user flashes (ESC 1 with CAN_NODE_BASE 0x000 and
+  ESC 2 with 0x020 -- however the project selects the node base; do not change
+  that mechanism). The build must be warning-free for the edited files.
+- Do not commit or push unless the user asks. If asked: branch is
+  tune/current-sensing-gain-16x; end the commit message with the attribution
+  line the user's setup requires.
+- When done, report: the diff, build result (errors/warnings), and confirm
+  both boards were flashed. The Pi session then verifies on hardware.
+
+All paths below are relative to ESC_based/STM32/MCWorkbench/.
+
+===========================================================================
+CHANGE 1 (plan step B4): TELEM sends the 1 ms mean of Iq, not one raw sample
+===========================================================================
+
+WHY
+The current loop samples Iq at 16 kHz, but TELEM (sent at 1 kHz) carries one
+raw sample and discards the other 15. Measured on the Pi: that sample's noise
+is 0.030-0.043 A std at rest, and a 16:1 decimation with no anti-alias filter
+folds 500 Hz-8 kHz content into 0-500 Hz (a 247 Hz peak in the spectrum is
+probably that). The firmware ALREADY accumulates all 16 samples every period
+(IqTelem_UpdateHF / IqTelem_GetMeanAndReset in Src/mc_tasks_foc.c, raw s16A
+units) and then throws the mean away. A 16-tap boxcar has nulls exactly at
+1, 2, 3 ... kHz, where aliasing folds from. Expected: noise >= 2x lower,
+aliased peak gone, ~0.5 ms extra delay at most. The TELEM byte layout does
+not change, so the Pi needs no change.
+
+FILE: STM32CubeIDE/Application/User/can_driver.c
+
+(a) After the existing #include lines near the top (mc_parameters.h is already
+    included there for scaleParams_M1), add:
+
+    /* B4: TELEM Iq = mean of every 16 kHz sample since the previous TELEM
+       (IqTelem_GetMeanAndReset, raw s16A, scaled to Amps). 0 = the old raw
+       single sample MC_GetIqdMotor1_F().q. */
+    #ifndef TELEM_IQ_MEAN
+    #define TELEM_IQ_MEAN 1
+    #endif
+
+(b) In static void SendTelemetry(const CAN_TickSample_t* s)  (about line 409):
+
+    DELETE this declaration (about line 413):
+      qd_f_t iqd = MC_GetIqdMotor1_F(); /* .q = torque-producing current, .d = 0 in
+                                           your control scheme */
+
+    REPLACE the comment block and call (about lines 422-430) that begins
+      /* The 16 kHz conditioned-Iq accumulator (IqTelem_UpdateHF) is still
+    and ends with
+      (void)IqTelem_GetMeanAndReset();
+    WITH:
+
+      /* The 16 kHz accumulator (IqTelem_UpdateHF) must be drained exactly once
+         per telemetry period -- GetMeanAndReset clears it; left uncalled the
+         sum grows without bound and loses float precision. With
+         TELEM_IQ_MEAN its mean is what TELEM sends (B4): a 16-tap boxcar has
+         nulls at 1, 2, 3 ... kHz, exactly where the 1 kHz decimation of the
+         raw sample aliased from. It returns the EWMA if no samples accrued
+         (HF task not running), so the field never reads as a bogus zero. */
+    #if TELEM_IQ_MEAN
+      float const iq_tx = IqTelem_GetMeanAndReset() * scaleParams_M1.current;
+    #else
+      (void)IqTelem_GetMeanAndReset();
+      float const iq_tx = MC_GetIqdMotor1_F().q; /* raw single sample */
+    #endif
+
+    REPLACE (about line 440):
+      memcpy(&payload[0], &iqd.q, sizeof(float));
+    WITH:
+      memcpy(&payload[0], &iq_tx, sizeof(float));
+
+    Check that nothing else in SendTelemetry() uses `iqd` (it should not).
+
+FILE: Inc/can_driver.h
+
+(c) In the TELEM layout comment (about line 86), change
+      [0..3] float32  Iq, Amps (MC_GetIqdMotor1_F().q -- raw, unfiltered)
+    to
+      [0..3] float32  Iq, Amps: 1 ms mean of the 16 kHz samples when
+                      TELEM_IQ_MEAN (default, can_driver.c); raw single
+                      sample MC_GetIqdMotor1_F().q when TELEM_IQ_MEAN is 0
+
+===========================================================================
+CHANGE 2 (safety): direct-mode host timeout 200 ms -> 20 ms
+===========================================================================
+
+WHY
+In direct mode the firmware zeroes Iq if no SET_IQ arrives within
+COUPLE_DIRECT_TIMEOUT_US. On the Pi, SD-card write stalls froze the host
+control loop for up to 2 s (confirmed). During one such freeze the follower's
+last command (-0.07 A) stayed applied for the full 200 ms and the free
+follower spun 1.8 revolutions; teleop can command up to 1 A. Every ESC_based
+host script resends SET_IQ at least every 10 ms (teleop/spin_test/a5 every
+2 ms, plant_gain 1 ms, zero_iq_check 10 ms), so 20 ms does not trip in normal
+use; a longer stall now zeroes the current (trip HOST_TIMEOUT) and the next
+SET_IQ resumes. HOLD/PEER coupling modes have no host timeout and are not
+affected.
+
+FILE: Inc/couple_ctrl.h  (about line 113)
+
+    CHANGE
+      #define COUPLE_DIRECT_TIMEOUT_US 200000u
+    TO
+      #define COUPLE_DIRECT_TIMEOUT_US 20000u /* was 200000u; see FIRMWARE_CHANGES.txt */
+
+    Leave the surrounding #ifndef/#endif and the comment above it as they are,
+    except: if that comment states 200 ms anywhere, update it to 20 ms.
+    (couple_ctrl.c uses the macro at about lines 265-267; no change there.)
+
+===========================================================================
+NOT INCLUDED (decided by the user)
+===========================================================================
+- B5, clamping direct SET_IQ at +-0.8 A, was DROPPED by the user, who says a
+  max current is already set. Do not add a clamp.
+
+===========================================================================
+AFTER FLASHING (done on the Pi, for reference)
+===========================================================================
+Both boards will power-cycle, so the Pi's bus_check.py shows RESET. The Pi
+session then runs zero_iq_check.py (re-aligns the encoders), and the B4
+checks: a 30 s HOLD zero-gain run on the free follower (Iq std >= 2x lower
+than 0.030-0.034 A, 247 Hz peak gone) and the A5(c) staircase (50 % step
+response <= 2.07 ms). Nothing for the dev-machine session to do there.

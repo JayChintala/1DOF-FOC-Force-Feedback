@@ -13,7 +13,7 @@ firmware on both B-G431B-ESC1 boards. Newest entries at the bottom.
 | B1 | PASS (live) |
 | B2 | PASS (offline) |
 | B3 | PASS (offline) |
-| B4 | waiting on the dev machine |
+| B4 | PASS (flashed 2026-10-25; noise 9.7× lower; aliased peak reduced, not gone) |
 | B5 | dropped by the user |
 | B6 | FAIL (offline) |
 | B7 | script ready, needs a bench session |
@@ -123,6 +123,13 @@ so these were already equal in the old interface. No other change.
 ---
 
 ## Firmware changes (for the dev machine)
+
+> **Authoritative instructions: `ESC_based/FIRMWARE_CHANGES.txt`**
+> (2026-10-25), a self-contained file to hand to a Claude Code session on
+> the dev machine. It supersedes the code snippets below where they
+> differ. In particular, B4 there also removes the then-unused `iqd`
+> variable (the raw read moves into the `#else` branch) and updates the
+> TELEM comment in `can_driver.h`.
 
 The Pi does not edit firmware. Make these on the dev machine by **hand
 edit only**: never regenerate from Motor Control Workbench, because the
@@ -1771,6 +1778,305 @@ near the end of each hold and reports the 7 readings.
 
 ---
 
+## 2026-10-22: Host real-time priority (stall fix, step 1 of 2)
+
+**Why:** the host loop stalled for up to 2,082 ms (B1). The CAN RX
+thread's `SCHED_FIFO` request in `can_interface.py`
+(`_apply_rx_thread_priority`, priority 20) failed silently, because the
+user's RT limit was 0 (`ulimit -r` = 0, PermissionError). The thread ran
+at normal priority, competing with everything else.
+
+**Change (system, approved by the user):** new file
+`/etc/security/limits.d/99-rtprio.conf`:
+
+```
+jayrpi4  -  rtprio  50
+```
+
+- PAM applies it on login: `pam_limits` is in `/etc/pam.d/sshd` (line
+  40), `lightdm`, `login`, `sudo` and `cron`.
+- This Claude Code session runs under the VS Code server, which inherits
+  its limits from the SSH login that started it. The **new limit only
+  applies after a reboot or re-login.**
+- **Revert:** `sudo rm /etc/security/limits.d/99-rtprio.conf`, then
+  reboot.
+
+**Verified (before reboot):** in a fresh PAM login session
+(`sudo -i -u jayrpi4`), `ulimit -r` = 50 and
+`os.sched_setscheduler(0, SCHED_FIFO, 20)` succeeds. The old session
+still shows 0, as expected.
+
+**Step 2, after the reboot and on proper power** (not done yet):
+
+1. Confirm `ulimit -r` = 50 inside the Claude Code shell.
+2. Run 3 × 60 s teleop free-motion runs with `TELEOP_FRAME_QUEUE=1` and
+   compare max `loop_dt` with B1 (2,082 ms) and Phase A (up to 1,045 ms).
+3. Optionally put the control loop on RT too, e.g.
+   `chrt -f 10 taskset -c 2,3 python3 teleop_test.py`, below the RX
+   thread's 20. That is not done in code yet.
+4. If stalls persist, test logging to `/dev/shm` (SD-card writes).
+
+---
+
+## 2026-10-22: Host stall fix, step 2: verification runs
+
+**Setup:**
+
+- After the reboot: `ulimit -r` = 50 and SCHED_FIFO(20) succeeds in the
+  Claude Code shell. The Pi is on the proper supply: 0 under-voltage
+  events, `throttled=0x0`.
+- Both ESCs had been power-cycled. `zero_iq_check.py` re-aligned them:
+  counter jump to 142 at 2.016 s on both; RUN Iq mean A +0.0000 A,
+  B +0.0004 A; PASS. Log: `logs/precheck_zero_iq_realign_2026-10-22.csv`.
+- **Runs:** three free-motion teleop runs,
+  `TELEOP_FRAME_QUEUE=1 timeout -s INT 75 taskset -c 2,3 python3 teleop_test.py`,
+  with the user on the leader. `bus_check.py` was OK after each.
+
+| Run | Log | Logged to | Leader vel rms (counts/s) | max loop_dt | Iterations > 5 ms | 2.5–5 ms | p95 / p99 | Missing frames |
+|---|---|---|---|---|---|---|---|---|
+| 1 | `teleop_KVs3e-05_FB-1_9.csv` | SD | 749 (gentle) | 36.0 ms | 16 | 81 | 2.09 / 2.21 ms | 0 |
+| 2 | `teleop_KVs3e-05_FB-1_10.csv` | SD | 651 (gentle) | **1,034 ms** (also 369 ms) | 16 | 71 | 2.07 / 2.20 ms | 0 |
+| 3 | `teleop_KVs3e-05_FB-1_11_shm.csv` | **RAM** (`/dev/shm`, copied back) | 6,902 (vigorous) | **14.8 ms** (start-up iteration) | 1 | 14 | 2.06 / 2.16 ms | 0 |
+
+For comparison, before the RT fix: B1 had a max of 2,082 ms; Phase A
+had up to 1,045 ms.
+
+**RT priority fixed the RX thread:**
+
+- In B1 the 2,082 ms stall left `enc_lag_a` (parse − kernel time) at
+  47.6 ms, so the RX thread had stalled too.
+- In run 2 the lag after both stalls was 0.11 ms and 0.06 ms, and the
+  1,016 frames buffered during the 1,034 ms stall arrived every 1.00 ms
+  (max 1.04 ms) and were parsed on time.
+- **Only the main control loop still stalled.**
+
+**Logging to RAM removed the stalls in run 3**, with the most vigorous
+motion of the three. That points to blocking SD-card writes in the main
+loop (two CSV files written every iteration) as the remaining cause.
+
+- Inferred, and strongly suggestive, but one clean run is not proof:
+  run 1 on SD was also free of long stalls.
+- Felt-current RMS is not comparable across these runs, because motion
+  intensity differed by 10×. Run 3's iq_b_cmd RMS is 0.258 A at
+  vel_b rms 6,902.
+
+**Status: DEFERRED by the user (2026-10-22).** Logged as a potential
+issue, not to be worked on for now.
+
+**Proposed fix (not applied):** keep the live loop off the SD card.
+
+- **Option A (simplest):** teleop writes its CSVs to a RAM directory
+  during the run and moves them to `logs/` on exit, via an env/config
+  `TELEOP_LOG_DIR`, defaulting to `logs`.
+- **Option B:** a writer thread with a queue. File writes release the
+  GIL, so an SD stall would block only the writer.
+- Then confirm with 3 more runs (≥ 1 vigorous) logged that way: max
+  loop_dt < 50 ms, and no iteration over 100 ms.
+- The same applies to every live script (`spin_test`, `a5_command_test`,
+  `plant_gain_test`, `b7_force_cal`). Those buffer their data in memory
+  and write only at the end, so they are already safe, except
+  `coupling_monitor.py`, which writes as it goes (inferred from code).
+
+---
+
+## 2026-10-22: Feasibility check (offline): can the follower estimate separate contact from free motion?
+
+**Why:** the user asked for reasonable assurance, from the data, that the
+goal is achievable, and for a timeline.
+
+**Script:** `feasibility.py`, plus ad-hoc fits recorded below. Estimator:
+`ExternalTorqueObserver` (C1 form, 20 Hz, G_A = 9.025e6) on every-frame
+logs, with AB 55 Hz velocity and mcu dt.
+
+**Free-motion floor** (nothing touched; follower = motor A):
+
+| Run | Leader \|v\| rms (counts/s) | Estimate rms | − friction (held-out fit) | Moving | At rest | p99 |
+|---|---|---|---|---|---|---|
+| B1 `_8_frames` (moderate) | 8,991 | 47.8 mA | 43.8 | 44.6 | 23.7 | 125 |
+| run 1 `_9_frames` (gentle) | 3,601 | 36.0 | 37.7 | 45.8 | 19.8 | 178 |
+| run 2 `_10_frames` (gentle) | 6,699 | 38.5 | 42.5 | 47.5 | 25.3 | 144 |
+| run 3 `_11_shm_frames` (vigorous, t = 30–47 s excluded) | 12,142 | 45.3 | 41.7 | 41.8 | 32.3 | 109 |
+
+- **Run 3 contains contact.** From 33 to 46 s the follower was nearly
+  stationary (span 15–450 counts) at 0.4–0.85 A. The estimate correctly
+  read 0.5–1.0 A of external torque. Excluded from the floor.
+  - Either the follower was blocked or held, or it hit something. Not
+    confirmed with the user.
+  - The fast stretch at 30.5–32 s (400–570 mA peaks at about 10,000
+    counts/s) is ambiguous, so it was excluded too.
+- **Friction model barely helps** (Coulomb 26 mA, low-speed term −32 mA,
+  viscous −7 mA per 10,000 counts/s).
+
+**Error grows with acceleration** (pooled):
+
+| \|a\| (counts/s²) | n | Residual rms | Median a/G |
+|---|---|---|---|
+| < 1e5 | 121,751 | 28.8 mA | 0.4 mA |
+| 1e5–3e5 | 64,217 | 37.5 | 20 |
+| 3e5–1e6 | 66,513 | 44.8 | 57 |
+| 1e6–3e6 | 15,741 | 70.3 | 145 |
+| > 3e6 (about 1 %) | 2,337 | 164.4 | 489 |
+
+**Cause: timing, not G.** Mean floor over the 4 runs by G and velocity
+advance:
+
+| G \ advance | 0 ms | 2 ms | 3 ms | 4 ms |
+|---|---|---|---|---|
+| 6.0e6 | 48.5 | 40.0 | 39.0 | 40.4 |
+| 8.0e6 | 42.8 | 35.5 | 34.5 | 35.8 |
+| **9.025e6 (A2)** | 41.9 | 35.3 | **34.4** | 35.5 |
+
+- A2's G is confirmed as best.
+- Aligning velocity and current (the AB 55 Hz estimator lags 2.6 ms)
+  cuts the floor by 18 %, to 34.4 mA mean (24.9 mA on the gentle run).
+- **Live implementation:** delay the current by about 3 ms to match the
+  velocity, rather than advancing velocity. That adds 3 ms latency,
+  small against the 30 ms tap target (inferred).
+
+**Contact signal:**
+
+- A1 hand-clamp presses: 0.28–0.85 A of follower current (A1 run 2
+  entry).
+- Run 3's blocked stretch: estimate 0.5–1.0 A.
+- **Margin over the free floor (34–44 mA rms, p99 110–180 mA):** about
+  7–25× at RMS and about 2–8× against p99.
+- Force terms (nominal 3.3 N/A): floor about 0.11–0.15 N rms; contacts
+  1–3 N.
+
+**What this shows and does not show:**
+
+- **Shown (measured):** with the data we already log, the estimate
+  separates free motion from pressing on the follower by roughly an order
+  of magnitude. G is right, and the largest fixable error found so far
+  (timing) is understood.
+- **Supported, not yet shown (inferred):**
+  - B4's averaged Iq (raw noise ≥ 2× lower) and the angle-locked ripple
+    (12/rev about 20 mA) are the next floor reductions. A realistic
+    target is about 15–25 mA rms, so the brief's 15 mA is ambitious but
+    plausible.
+  - **Rigid vs soft** depends on rendering force against penetration.
+    The sensing resolution supports it by a wide margin: 0.031 mm/count,
+    foam of e.g. 0.5 N/mm reaches 2 N at about 4 mm (130 counts), while a
+    rigid stop reaches 2 N within a few counts, and the force floor is
+    about 0.1 N. But it has not been demonstrated: no rigid-stop or foam
+    data at a fixed angle exists yet.
+- **Not yet known:** closed-loop stability of the felt force (C3),
+  through the hand with about 5 ms of loop delay. That is the largest
+  remaining technical risk.
+
+---
+
+## 2026-10-22: SD-card write stalls confirmed (no motors, no CAN)
+
+**Why:** the user asked to re-test the SD hypothesis, and asked why the
+Pi would not crash if the SD card were "failing".
+
+- It is not a failure. `write()` normally copies into the page cache and
+  returns at once.
+- When the card falls behind (dirty-page limits, ext4 journal commit
+  every 5 s), the kernel blocks the *writing thread* until the card
+  catches up. Consumer SD cards routinely pause for hundreds of ms during
+  internal housekeeping (erase, wear-levelling).
+- Only that thread waits; nothing crashes. This matches run 2, where the
+  RX thread kept parsing while the main loop froze.
+
+**Test:** new `sd_stall_test.py`. It reproduces teleop's per-iteration
+I/O with the frame queue on (one 23-column row plus four frame rows every
+2 ms, `csv.writer`, the same deadline loop), with no CAN and no motors. It
+times every iteration and every write call, and samples `/proc/meminfo`
+Dirty/Writeback. Run with `taskset -c 2,3`, 75 s each.
+
+| Run | Target | p95 / p99 loop | max loop | > 5 / > 50 / > 100 ms | Slowest write calls | Dirty / Writeback max |
+|---|---|---|---|---|---|---|
+| 1 | SD (`logs/sdtest`) | 2.013 / 2.040 ms | **1,641.5 ms** | 23 / 2 / 2 | 1,641.4, 1,117.4, 31.7 ms | 6,760 / 4,812 kB |
+| 2 | SD | 2.012 / 2.029 ms | **853.1 ms** | 7 / 2 / 1 | 853.1, 68.1, 27.7 ms | 6,504 / 5,928 kB |
+| 3 | SD | 2.011 / 2.028 ms | 57.9 ms | 7 / 1 / 0 | 57.9, 42.4 ms | 6,976 / 6,556 kB |
+| 4 | RAM (`/dev/shm/sdtest`) | 2.004 / 2.015 ms | **5.4 ms** | 1 / 0 / 0 | 2.3 ms max | 1,924 / 1,672 kB |
+
+- **On SD, the longest loop iteration equals the slowest single write
+  call in every run.** The loop was blocked inside `write()`.
+- RAM never exceeded 5.4 ms. There was no kernel message (no hung task,
+  no mmc error), and `throttled=0x0`.
+
+**Verdict:** **CONFIRMED.** Teleop's remaining 0.4–2 s main-loop stalls
+are SD-card write stalls. Measured here without motors; that teleop's
+stalls are the same mechanism is inferred, strongly supported by run 3
+(teleop on RAM, max 14.8 ms).
+
+**Status:** still a deferred potential issue (user, 2026-10-22). **It must
+be fixed before C3.**
+
+- Simplest fix: log to RAM and move the files at exit, or use a writer
+  thread.
+- A longer-term option is a higher-endurance SD card or USB SSD (inferred
+  to stall less; untested).
+- The `logs/sdtest/sd_*.csv` files are throwaway test output.
+
+---
+
+## 2026-10-25: B4, TELEM sends the 1 ms mean of Iq (after the firmware flash)
+
+**What changed:** the user flashed both boards with
+`ESC_based/FIRMWARE_CHANGES.txt`: B4 (`TELEM_IQ_MEAN` = 1) plus
+`COUPLE_DIRECT_TIMEOUT_US` = 20,000 µs. B5 was not included (dropped).
+
+**Passive check right after the flash** (uncalibrated idle, no START):
+
+| Board | Idle Iq std before (P1) | After flash |
+|---|---|---|
+| ESC1 | 77.9 mA | 34.2 mA (2.3× lower) |
+| ESC2 | 47.6 mA | 31.9 mA (1.5× lower) |
+
+ESC1 also showed 404 distinct values in 8 s, against about 40–200
+before. Consistent with averaging (inferred).
+
+**What ran** (`throttled=0x0`):
+
+1. **`zero_iq_check.py`:** alignment counter jump to 142 at 2.016 s;
+   PASS. RUN noise at 0 A: A std **4.7 mA**, B **6.7 mA** (2026-10-22
+   re-align: 45.5 / 29.4 mA). Log: `logs/precheck_zero_iq_B4.csv`.
+2. **HOLD, zero gains, 30 s, follower free:** `coupling_monitor.py --mode
+   hold --motors a --kp 0 --kd 0 --kd-local 0 --duration 30`. Log:
+   `logs/B4_hold_free.csv`. Shaft drifted 287 counts.
+3. **A5(c) staircase, 20 s:** `a5_command_test.py --mode stair`. Log:
+   `logs/A5_stair.csv` (+ `_cmd`). The pre-B4 run was kept as
+   `logs/A5_stair_preB4.csv`.
+
+| Criterion | Before | After B4 | Threshold | Verdict |
+|---|---|---|---|---|
+| Iq std, follower free at 0 A | 30.4 mA (`A3_free`, raw ≈ 3996) | **3.12 mA** (p1…p99 −7.5…+7.2 mA) | ≥ 2× lower | **PASS (9.7×)** |
+| Step 50 % crossing (host send → TELEM) | 1.47 ms | **1.45 ms** | ≤ 2.07 ms | **PASS** |
+| Aliased peak (246–248 Hz) | 6.13 mA (clamped) on a 2.32 mA floor | **0.76 mA** on a 0.16 mA floor | gone | **not gone** (8× smaller, still 4.7× above floor) |
+| Drift (3 × 10 s means) | 0.89 mA | 0.01 mA | — | — |
+
+- The shaft angle differed between the before and after runs. Noise
+  varies ≤ 1.8× with angle here (per-bin std 3.0–5.2 mA), so the
+  reduction is ≥ 5× even in the worst case.
+- **The 247 Hz peak** is consistent with aliasing that the 16-tap boxcar
+  only partly removes: its nulls are at 1, 2, 3 kHz…, while components
+  near 753 or 1,247 Hz, which also fold to 247 Hz, are cut only 3–5×.
+  It could also be real 247 Hz content (inferred either way).
+  - It is negligible in absolute terms (0.76 mA against a 3.1 mA std).
+  - If it matters later, the firmware's EWMA, or a longer boxcar across
+    2 periods, would attack it.
+- **Step response:** at 1 ms after the send it reads 10.6 mA (was 7.4),
+  because the mean includes the samples after the step within that tick.
+  Settling is unchanged (48.9 mA at 3 ms).
+
+**Verdict: B4 PASS** on noise (9.7×) and delay. The aliased-peak
+criterion is only partly met: the peak is 8× smaller but still visible.
+
+**Consequences:**
+
+- C1's free-floor target (15 mA rms) looks much more reachable. The
+  sensor-noise part of the 34–44 mA floor in the feasibility check came
+  from raw samples (about 0.03–0.04 A std); it is now about 3 mA (inferred
+  until C1 is re-run on new data).
+- **All pre-B4 Iq data (Phase A, B1, B6 fits, feasibility) is "raw
+  sample" telemetry.** Any refit (B6, C1) should use post-B4 logs.
+
+---
+
 ## Phase A summary (2026-10-20)
 
 | Step | Result | Key number |
@@ -1816,8 +2122,8 @@ chooses otherwise):
 
 | # | Item | Needs | How |
 |---|---|---|---|
-| 1 | Host stall fix: RT priority for the RX thread and the loop | **user approval** (system change) | Create `/etc/security/limits.d/99-rtprio.conf` with `jayrpi4 - rtprio 50` (sudo), then restart Claude Code / log in again. Check: `ulimit -r` shows 50, and `python3 -c "import os; os.sched_setscheduler(0, os.SCHED_FIFO, os.sched_param(20))"` succeeds. Then re-measure max loop_dt over 3 × 60 s teleop runs (`TELEOP_FRAME_QUEUE=1`). If stalls persist, test logging to `/dev/shm`. |
-| 2 | B4 + timeout firmware | **user, dev machine** | Section "Firmware changes" near the top. After flashing: `bus_check.py` (shows RESET) → `zero_iq_check.py` → the B4 checks. |
+| 1 | Host stall fix: RT priority for the RX thread and the loop | **RT done and verified 2026-10-22. The remaining main-loop stalls (likely SD writes) are a potential issue, DEFERRED by the user. Revisit before C3 (closed-loop felt force).** | Create `/etc/security/limits.d/99-rtprio.conf` with `jayrpi4 - rtprio 50` (sudo), then restart Claude Code / log in again. Check: `ulimit -r` shows 50, and `python3 -c "import os; os.sched_setscheduler(0, os.SCHED_FIFO, os.sched_param(20))"` succeeds. Then re-measure max loop_dt over 3 × 60 s teleop runs (`TELEOP_FRAME_QUEUE=1`). If stalls persist, test logging to `/dev/shm`. |
+| 2 | B4 + timeout firmware | **DONE 2026-10-25**, flashed; B4 PASS (see the entry) | Section "Firmware changes" near the top. After flashing: `bus_check.py` (shows RESET) → `zero_iq_check.py` → the B4 checks. |
 | 3 | B6 fix: A4b G-vs-frequency chirp | **user OK**, follower free, about 25 s | Not written yet. Add `--chirp f0,f1,amp` to `spin_test.py` (design in section 4), run ±4000, and fit H(f) = A(f)/I(f) with I from `iq_meas`. |
 | 4 | B6 fix: held-out runs | **user OK**, follower free, about 25 s | `spin_test.py --node A --speed ±4000 --time 10 --iq-max 0.3 --ki 2e-4` (baseline gains). Then refit in `b6_ripple.py`: add these to HELDOUT, use per-run friction (variant C or A in the B6 entry), and model G(f) if A4b shows a roll-off. |
 | 5 | B7 force calibration | **user at the bench** with the kitchen scale | Link on the scale on a rigid support, tared at 0 A. `python3 b7_force_cal.py --sign +1` (if level 1 aborts on travel, delete `logs/B7_cal.csv` and use `--sign -1`). The user reports 7 readings in grams; then `python3 b7_force_cal.py --fit logs/B7_cal.csv --grams g1,…,g7`. |
@@ -1866,6 +2172,17 @@ Re-collecting needs the same commands as each entry.
 - B5 (clamp) was dropped.
 - "Table" in A1 means the hand clamping the follower.
 - Loaded A4 runs use a plate pressed on the shaft.
+
+**Session note, 2026-10-22:**
+
+- The Pi was powered from a PC USB port: 13 under-voltage events in the
+  first 9 min, `throttled=0x50000`.
+- **Switch back to the proper 5 V / 3 A supply before any motor test.**
+  Under-voltage coincided with ESC1 bus dropouts before and would distort
+  loop-timing measurements.
+- Both ESCs had been power-cycled (RESET in `bus_check.py`), so run
+  `zero_iq_check.py` first.
+- The firmware is not flashed yet (user, 2026-10-22).
 
 **Hardware reminders:**
 
@@ -2081,7 +2398,7 @@ from rest.
   `G_B_SOURCE = "old" | "A2"` (A2 = 9,672,000), default "old" until the
   user says otherwise.
 
-**B4. [DEV MACHINE: stop and tell the user] TELEM boxcar mean.** — **WAITING on the dev machine** (code in "Firmware changes").
+**B4. [DEV MACHINE: stop and tell the user] TELEM boxcar mean.** — **DONE 2026-10-25, PASS** (see the B4 entry).
 
 - **Firmware change:** in `can_driver.c` `SendTelemetry()`
   (`STM32CubeIDE/Application/User/can_driver.c:409-445`), behind a new
@@ -2236,13 +2553,21 @@ path), as in the brief.
      firmware change.
    - `bus_check.py` and the scripts' reset prechecks catch resets
      between runs.
-2. **Host loop stalls up to 2 s (B1 run: 2,082 ms).** During a stall the
+2. **Host loop stalls up to 2 s (B1 run: 2,082 ms). POTENTIAL ISSUE, DEFERRED by the user (2026-10-22).**
+   - The RX thread is fixed by RT priority.
+   - The main loop still stalled for up to 1,034 ms when logging to SD,
+     and not when logging to RAM. **Cause CONFIRMED 2026-10-22 by
+     `sd_stall_test.py`** (no motors): SD write calls blocked for up to
+     1,641 ms; RAM max 5.4 ms.
+   - Revisit before C3: a stall during closed-loop felt force holds the
+     last command up to the 200 ms firmware timeout. During a stall the
    last SET_IQ stays applied for 200 ms. In B1, −0.07 A spun the free
    follower 1.8 rev.
    - Proposed firmware mitigation (dev machine): lower
      `COUPLE_DIRECT_TIMEOUT_US` from 200 ms to about 20 ms.
-   - **First fix to try:** let Python get SCHED_FIFO. It currently fails
-     silently (`ulimit -r` = 0). Options, which are system changes and
+   - **First fix (applied 2026-10-22, verify after reboot):** let Python
+     get SCHED_FIFO; it used to fail silently (`ulimit -r` = 0). See the
+     "Host real-time priority" entry. Options, which are system changes and
      need the user's approval:
      - an `rtprio` entry in `/etc/security/limits.d/`;
      - `sudo setcap cap_sys_nice+ep` on the venv's Python;
@@ -2257,3 +2582,51 @@ path), as in the brief.
 5. **Angle-dependent Iq noise ×1.3–2.** See A3b. B4 may reduce it.
 6. **The FF echo.** By construction, tau_h ≈ −LPF(i_b) while the leader
    is held. C3 replaces the felt source; watch the hand-closed loop gain.
+
+### 9. Timeline to the goal (drafted 2026-10-22)
+
+Effort is in focused work, not calendar days. "Bench" means the user at
+the rig. "Claude" means offline analysis or code with no motors. The
+order is chosen so each gate is met before more effort goes in.
+
+**Fixtures to prepare before session 3** (user, one-off):
+
+- A **rigid stop** the follower meets at one angle, from one side, e.g. a
+  screwed-down block.
+- **Foam samples** of 2–3 stiffnesses, plus a balloon, mountable at that
+  angle.
+- The **kitchen scale** on a rigid support (B7, D1, D2).
+
+| # | Session | Who | Bench time | Claude time | Steps | Gate / exit criterion |
+|---|---|---|---|---|---|---|
+| 1 | Firmware | user (dev machine) + bench | ~15 min | ~30 min | B4 averaged Iq + 20 ms timeout; flash both boards; re-align; A3/A5(c) rerun | B4 pass: Iq std ≥ 2× lower, 247 Hz gone, step ≤ 2.07 ms |
+| 2 | Calibration | bench (scale) | ~20 min | ~30 min | B7 force calibration | R² ≥ 0.99, slope within 15 % of 3.3 N/A, i.e. N per A known |
+| 3 | Contact data | bench (fixtures) | ~30 min | ~1 h | Free motion, rigid-stop presses and taps, foam presses; every-frame logging (`TELEOP_FRAME_QUEUE=1`, logs to RAM) | Clean labelled data for C1 |
+| 4 | C1 offline | Claude | — | ~2–4 h | Follower estimator with the 3 ms current/velocity alignment, friction, ripple (B6 refit on session-3 data); sign check | **Gate A:** free floor ≤ 25 mA rms (target 15), rigid press within 10 % of B7, contact ≥ 10× floor |
+| 5 | C2 shadow | bench | ~20 min | ~1 h | Estimator live, logged only; nothing felt changes | C1 metrics hold live; loop p95 ≤ 2.1 ms |
+| 6 | C3 felt force | bench (several short runs) | 30–60 min, possibly 2 sessions | ~2 h | Fix SD-write stalls first (deferred issue). Felt force = −K_F·tau_env, K_F 0.25 → 0.5 → 1.0, 20 Hz path | **Gate B:** stable at K_F ≥ 0.5 (no 5–40 Hz ringing, no watchdog trips); free felt RMS ≤ 0.035 A; tap rise ≤ 30 ms. **First point where rigid vs soft should feel different** — informal check by the user here |
+| 7 | C4 anchor | bench | ~20 min | ~1 h | Bounded leaky position anchor | Drift < D + 50 counts over 60 s; < 15 mA felt change in a 5 s press |
+| 8 | D1–D3 | bench (scale, fixtures) | ~60–90 min | ~2 h | Force accuracy ≥ 6 levels; stiffness foam, balloon and rigid; 20 taps | D1 ≤ max(0.05 N, 10 %); D2 within 20 %, rigid ≥ 5× foam; D3 rise ≤ 30 ms, peaks within 20 % |
+| 9 | D4 blind trials | bench + helper | ~60–90 min | ~2 h (randomiser and analysis script first) | ≥ 20 trials per pair plus a control; follower hidden; masking headphones | rigid vs soft ≥ 17/20, control near chance; psychometric curve |
+
+**Totals:** about 5–7 h of bench time over 8–10 sessions, and about
+12–16 h of Claude work.
+
+- At 2–3 bench sessions a week, that is roughly **3–5 weeks** of calendar
+  time, depending mostly on Gate B (C3 stability) iterations.
+- **Optional, any time before session 4:** the A4b G(f) chirp (5 min of
+  bench time) if Gate A misses on motion-related error.
+
+**Biggest risks, in order:**
+
+1. **Closed-loop stability of the felt force (C3).** Unknown until
+   tried. Mitigations: lower FF_GAIN, the leader damping KB_DAMP, a lower
+   estimator bandwidth.
+2. **Free-floor target:** 15 mA is ambitious. 25–35 mA is likely enough
+   for rigid vs soft (contacts are 300–1,000 mA), but it may miss the
+   brief's free-space RMS number.
+3. **Leader stiction about 0.06 A (about 0.2 N):** forces below that
+   reach the hand poorly. Rigid vs soft contacts are well above it.
+4. **Reliability:** occasional simultaneous ESC resets (cause unknown,
+   suspect supply), and SD-write stalls (deferred; must be fixed before
+   C3).
