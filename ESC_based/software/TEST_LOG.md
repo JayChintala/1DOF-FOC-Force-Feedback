@@ -18,7 +18,7 @@ firmware on both B-G431B-ESC1 boards. Newest entries at the bottom.
 | B6 | FAIL (offline) |
 | B7 | **PASS (levels 1–6)**: Kt = 64.6 mN·m/A at r ≈ 160 mm (−2 % vs nominal). The 4 cm rerun confirms the scaling (3×, rig wobble). Motor mount not rigid: clamp it before Phase C data |
 | C1 | **Gate A PASS (offline)**: free 10.3 mA (gentle motion), static ≤ 2.8 %, sign settled, rigid ≥ 6 N/mm vs foam ≈ 0.3 N/mm |
-| C2 | Chopstick arm: FAIL (128 mA). **3D-printed arm (r 75.7 mm): G = 3.85e6, R² 0.93; free floor 23 mA held-out with friction + gravity (offline) = Gate A pass.** Live rerun with the fitted model pending |
+| C2 | **PASS (live, 3D-printed arm, fitted model)**: free floor 19.1 mA (contact excluded; brief's 15 mA not met), static ≤ 5.0 %, loop p95 2.09 ms |
 
 **Blocker for closed-loop work:** host stalls of up to 2 s.
 
@@ -2639,6 +2639,65 @@ starting 20 s in).
 
 **Next:** C2 live rerun with the model: free motion plus static holds on
 the rigid surface, at r = 75.7 mm.
+
+---
+
+## 2026-10-25: C2 live with the fitted follower model — PASS
+
+**Runs:** `TELEOP_FRAME_QUEUE=1 TELEOP_SHADOW_TAU_ENV=1
+TELEOP_FOLLOWER_MODEL=follower_model_arm3d.json`, from `/dev/shm/c2/...`
+(RAM logging). The user was on the leader; the felt path was unchanged.
+
+**Run 1, free oscillations, no intended contact.**
+`logs/C2_live_free.csv` + `_frames`.
+
+- Follower range 35,548 counts (8.9 rev), |vel_a| rms 11,931 counts/s.
+- 0 missing frames; loop p95 2.09 ms, p99 2.25 ms, max 58.5 ms.
+
+| Window (s) | \|vel_a\| rms | tau_env rms | p99 |
+|---|---|---|---|
+| 1–11 | 10,104 | 19.4 mA | 53 |
+| 11–21 | 11,701 | 22.2 | 75 |
+| **21–31** | 11,871 | **76.1** | **469** |
+| 31–41 | 12,853 | 19.5 | 56 |
+| 41–51 | 14,734 | 17.8 | 53 |
+| 51–61 | 11,072 | 18.0 | 53 |
+| 61–71 | 9,773 | 16.3 | 49 |
+
+- **21–31 s was a contact,** not estimator error: all |tau_env| > 150 mA
+  rows fall at t = 26.2–28.1 s, within raw angle 2,180–2,390, with the
+  follower decelerating to a standstill. Peak −692 mA. The estimator
+  flagged it correctly.
+- **Excluding it: live tau_env rms 19.1 mA, p99 56 mA.**
+
+**Run 2, static holds.** `logs/C2_live_holds.csv` + `_frames`.
+
+- 0 missing frames; loop p95 2.09 ms, max 54.5 ms.
+- 16 holds (≥ 0.5 s within 5 counts, |iq| > 50 mA) at **two contact
+  positions**: raw about 990 (iq +0.27…+0.65 A) and raw about 1,620
+  (iq −0.49…−0.69 A).
+- Live tau_env vs measured current: **−1.1 … +5.0 %** (typically about
+  +3 %). Tip force 0.22–0.61 N.
+- The sign is correct in both directions: tau_env = −iq at standstill.
+
+| Criterion | Live result | Threshold | Verdict |
+|---|---|---|---|
+| Free floor (vigorous, contact excluded) | 19.1 mA rms (p99 56) | Gate A ≤ 25 mA (brief < 15) | **PASS** (brief: not met) |
+| Static accuracy | worst 5.0 % | ≤ 10 % | **PASS** |
+| Loop p95 | 2.09 ms | ≤ 2.1 ms | **PASS** (margin 0.01 ms; max 54–58 ms) |
+
+**Verdict: C2 PASS.**
+
+**Notes:**
+
+- The +3 % static bias is likely from the model's offset and gravity
+  terms at those angles (inferred).
+- Max loop_dt 54–58 ms with RAM logging is new compared with the
+  12–28 ms of earlier RAM runs. Possibly the per-frame numpy work in
+  `model_terms()` (inferred); watch it in C3.
+- **Before C3:** the SD-stall fix must be in code; today relies on the
+  run-from-`/dev/shm` workaround. The firmware's 20 ms host timeout now
+  bounds the damage from a stall.
 
 ---
 
