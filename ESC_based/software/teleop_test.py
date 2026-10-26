@@ -128,7 +128,11 @@ import sys
 import time
 
 from can_interface import MotorCANInterface
-from estimators import AlphaBetaVelocity, HandTorqueObserver
+import collections
+import json
+
+from estimators import AlphaBetaVelocity, ExternalTorqueObserver, HandTorqueObserver
+from fit_follower_model import model_terms
 from plot_run import plot_teleop_log
 
 # ---- Nodes ----
@@ -437,6 +441,26 @@ OBSERVER_IMPL = os.environ.get("TELEOP_OBSERVER", "inline")
 OBS_G_SOURCE = os.environ.get("TELEOP_OBS_G", "old")
 OBS_DT_SOURCE = os.environ.get("TELEOP_OBS_DT", "nominal")
 G_B_A2_CNT_S2_PER_A = 9_672_000
+# C2: shadow follower external-torque estimate, computed live and logged
+# only (column tau_env, plus tau_env_N at SHADOW_R_CONTACT_M) -- nothing
+# here feeds control or the felt path. Exactly the estimator validated
+# offline in c1_eval.py (2026-10-25): ExternalTorqueObserver at 20 Hz with
+# A2's G_A, fed every follower frame with its own AB 55 Hz velocity and the
+# current delayed SHADOW_ALIGN_FRAMES to match that velocity's ~2.6 ms lag.
+# Sign is the brief's: positive = the environment pushes the follower toward
+# +counts, i.e. tau_env = -(i - a/G). Needs USE_FRAME_QUEUE.
+# Override: TELEOP_SHADOW_TAU_ENV=1
+SHADOW_TAU_ENV = os.environ.get("TELEOP_SHADOW_TAU_ENV", "0") == "1"
+G_A_A2_CNT_S2_PER_A = 9_025_000
+SHADOW_ALIGN_FRAMES = 3
+SHADOW_KT_NM_PER_A = 0.0646           # B7
+SHADOW_R_CONTACT_M = 0.0757           # contact radius used for tau_env_N
+# C2: optional fitted follower model (fit_follower_model.py): its G replaces
+# G_A_A2_CNT_S2_PER_A and its friction + gravity terms are subtracted from
+# the shadow estimate. Unset = the C1 estimator unchanged.
+# Override: TELEOP_FOLLOWER_MODEL=follower_model_arm3d.json
+FOLLOWER_MODEL_PATH = os.environ.get("TELEOP_FOLLOWER_MODEL", "")
+                                      # (3D-printed arm, 2026-10-25; was 0.04)
 STALE_TIMEOUT_S = 0.05  # telemetry older than this -> fail safe
 STALE_WARN_EVERY_S = 1.0
 PRINT_EVERY_S = 0.1     # throttle console output so it can't bottleneck the loop
@@ -485,6 +509,20 @@ def main():
                                    else G_B_A2_CNT_S2_PER_A, OBS_CUTOFF_HZ)
                 if OBSERVER_IMPL == "class" else None)
     prev_obs_mcu_b = None
+    if SHADOW_TAU_ENV and not USE_FRAME_QUEUE:
+        raise SystemExit("TELEOP_SHADOW_TAU_ENV=1 needs TELEOP_FRAME_QUEUE=1")
+    follower_model = None
+    if FOLLOWER_MODEL_PATH:
+        if not SHADOW_TAU_ENV:
+            raise SystemExit("TELEOP_FOLLOWER_MODEL only applies with TELEOP_SHADOW_TAU_ENV=1")
+        with open(FOLLOWER_MODEL_PATH) as f:
+            follower_model = json.load(f)
+    shadow_g = follower_model["G_cnt_s2_per_A"] if follower_model else G_A_A2_CNT_S2_PER_A
+    shadow_obs = ExternalTorqueObserver(shadow_g, OBS_CUTOFF_HZ) if SHADOW_TAU_ENV else None
+    shadow_vel = AlphaBetaVelocity(VEL_AB_BANDWIDTH_HZ) if SHADOW_TAU_ENV else None
+    shadow_iq = collections.deque(maxlen=SHADOW_ALIGN_FRAMES + 1)
+    shadow_prev_us = [None]
+    tau_env = 0.0
 
     frames_file = frames_writer = None
     frames_logged = {"A": 0, "B": 0}
@@ -495,12 +533,27 @@ def main():
         frames_writer.writerow(["loop_iter", "motor", "bus_time", "mcu_time_us",
                                 "enc", "iq_meas"])
 
+    def shadow_update(r):
+        """C2: one follower frame into the shadow estimator (log only)."""
+        nonlocal tau_env
+        v = shadow_vel.update(r["mcu_time_us"], r["enc"])
+        shadow_iq.append(r["iq_meas"])
+        dt = ((r["mcu_time_us"] - shadow_prev_us[0]) * 1e-6
+              if shadow_prev_us[0] is not None else 1e-3)
+        shadow_prev_us[0] = r["mcu_time_us"]
+        motor_side = shadow_obs.update(v, shadow_iq[0], dt)  # oldest = delayed
+        if follower_model is not None:
+            motor_side -= model_terms(follower_model["coeffs_A"], v, r["enc"])
+        tau_env = -motor_side
+
     def drain_frames(loop_iter):
         """Queue path: write every frame since the last call, both motors."""
         for name, iface in (("A", a), ("B", b)):
             for r in iface.drain_records():
                 if vel_est is not None:
                     vel_out[name] = vel_est[name].update(r["mcu_time_us"], r["enc"])
+                if shadow_obs is not None and name == "A":
+                    shadow_update(r)
                 frames_writer.writerow([loop_iter, name, f"{r['bus_time']:.6f}",
                                         f"{r['mcu_time_us']:.0f}", f"{r['enc']:.0f}",
                                         r["iq_meas"]])
@@ -528,6 +581,7 @@ def main():
          # sign of iq_a_ff ever disagrees with the direction of the push, that
          # is the FF_GAIN sign problem and it will be obvious here.
          "tau_h", "iq_a_ff"]
+        + (["tau_env", "tau_env_N"] if SHADOW_TAU_ENV else [])
     )
 
     stale_count = 0
@@ -563,7 +617,9 @@ def main():
               f"KB_DAMP={KB_DAMP} IQ2_MAX={IQ2_MAX_A}A")
         print(f"Logging to {log_path}  (frame queue {'on' if USE_FRAME_QUEUE else 'off'}, "
               f"velocity estimator {VEL_ESTIMATOR}, observer {OBSERVER_IMPL}"
-              + (f"/G {OBS_G_SOURCE}/dt {OBS_DT_SOURCE}" if hand_obs else "") + ")")
+              + (f"/G {OBS_G_SOURCE}/dt {OBS_DT_SOURCE}" if hand_obs else "")
+              + (", shadow tau_env on" if SHADOW_TAU_ENV else "")
+              + (f" with model {FOLLOWER_MODEL_PATH} (G {shadow_g:,.0f})" if follower_model else "") + ")")
         print("Spin B; A should follow. Hold A; feel resistance in B. Ctrl+C to stop.\n")
 
         dt = 1.0 / CONTROL_RATE_HZ
@@ -791,6 +847,9 @@ def main():
                  f"{enc_lag_b:.5f}" if enc_lag_b is not None else "",
                  fresh_a, fresh_b, f"{elapsed:.5f}",
                  f"{tau_h_hat:.4f}", f"{iq_a_ff:.4f}"]
+                + ([f"{tau_env:.4f}",
+                    f"{tau_env * SHADOW_KT_NM_PER_A / SHADOW_R_CONTACT_M:.4f}"]
+                   if SHADOW_TAU_ENV else [])
             )
             rows_logged += 1
 

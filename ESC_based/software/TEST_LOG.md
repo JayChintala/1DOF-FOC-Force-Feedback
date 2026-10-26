@@ -18,6 +18,7 @@ firmware on both B-G431B-ESC1 boards. Newest entries at the bottom.
 | B6 | FAIL (offline) |
 | B7 | **PASS (levels 1–6)**: Kt = 64.6 mN·m/A at r ≈ 160 mm (−2 % vs nominal). The 4 cm rerun confirms the scaling (3×, rig wobble). Motor mount not rigid: clamp it before Phase C data |
 | C1 | **Gate A PASS (offline)**: free 10.3 mA (gentle motion), static ≤ 2.8 %, sign settled, rigid ≥ 6 N/mm vs foam ≈ 0.3 N/mm |
+| C2 | Chopstick arm: FAIL (128 mA). **3D-printed arm (r 75.7 mm): G = 3.85e6, R² 0.93; free floor 23 mA held-out with friction + gravity (offline) = Gate A pass.** Live rerun with the fitted model pending |
 
 **Blocker for closed-loop work:** host stalls of up to 2 s.
 
@@ -2385,6 +2386,259 @@ with the user on the leader and the felt path unchanged.
 **Next:** C2, shadow mode. Compute and log tau_env live in teleop
 (flagged), with the felt path unchanged. Then C3 needs the SD fix in
 code, not the cwd workaround, before closing the loop.
+
+---
+
+## 2026-10-25: C2 shadow mode, run 1 (vigorous free motion) — FAIL; follower plant changed with the new arm
+
+**Code (teleop, flagged):** `SHADOW_TAU_ENV` (`TELEOP_SHADOW_TAU_ENV=1`,
+needs the frame queue).
+
+- Every follower frame goes through `ExternalTorqueObserver` (20 Hz),
+  with its own AB 55 Hz velocity, the current delayed 3 frames, and
+  G_A = 9.025e6.
+- Logged as `tau_env` (brief sign) and `tau_env_N` (Kt 64.6 mN·m/A,
+  r = 0.04 m). No feedback into control or the felt path.
+- **Smoke-tested** on a physically consistent fake plant (i = a/G): free
+  phase mean +0.5 mA, a +0.1 A motor-side push reads −100.01 mA.
+
+**Run:** `TELEOP_FRAME_QUEUE=1 TELEOP_SHADOW_TAU_ENV=1 timeout -s INT 70
+taskset -c 2,3 python3 teleop_test.py`, from `/dev/shm/c2/free` (RAM
+logging), with the user swinging vigorously.
+
+- **Logs:** `logs/C2_free.csv` + `_frames`.
+- 0 missing frames; loop p95 2.06 ms, max 23.2 ms.
+- Follower covered **3,812 counts (343°)**; |vel_a| rms 6,249 counts/s;
+  raw current rms 137.5 mA.
+
+**Result:** live tau_env rms **127.8 mA**, p99 406 mA. An offline replay
+matches (127.5 mA). Gate A requires ≤ 25 mA, so **FAIL**.
+
+**Diagnosis:**
+
+- **Contact is minor:** stalls with force cover only 2.0 % of the time.
+- **The residual grows with acceleration:** 92 → 186 → 360 mA. The
+  leftover-inertia factor is k = +6.4, so far more current per
+  acceleration than G_A predicts.
+- **Effective follower plant gain on this run** (centred 15-frame LS for
+  v and a, moving frames, with Coulomb and viscous terms):
+  **G_eff ≈ 790,000 counts/s² per A**, consistent from 786k to 797k for
+  current delays of 0–4 ms. Coulomb about 30 mA; R² only 0.72.
+  - That is **about 11× below A2's 9.025e6**, measured on the original,
+    longer and apparently lighter link.
+  - The arm was replaced with a shorter (about 4 cm) one for B7 and the
+    C data. That it has about 11× the inertia is **inferred**; the user
+    has not been asked about the arm's mass yet.
+  - The C1 static holds (a = 0) and the gentle C1 free run were
+    insensitive to G, which is why C1 did not see this.
+
+**Replays with corrected G** (`c1_eval` estimator):
+
+| G | C2 free (vigorous) | C1 free (gentle) |
+|---|---|---|
+| 9.025e6 | 127.5 mA (p99 405) | 10.9 |
+| **0.79e6** | **78.4 mA** (p99 195) | 11.1 |
+| 0.70e6 / 0.90e6 | 77.9 / 80.9 | 11.2 / 11.0 |
+
+**What does not explain the remaining ~78 mA** (fit on the first half,
+tested on the second half):
+
+- **Friction model** (Coulomb + low-speed + viscous): 86.8 → 83.0 mA.
+  The residual is **98 mA even at \|a\| < 1e4 counts/s²**.
+- **1/rev "gravity" term** (73 mA fitted): 86.8 → 76–82 mA, but it
+  makes C1 free *worse* (11 → 64 mA). C1 sat at rest at those angles with
+  about 0 current, so it is **not gravity**. The angle pattern in C2's
+  mean residual (+81 mA near raw 1,100, −102 mA near raw 2,600) is more
+  likely direction-of-travel correlated with angle (inferred).
+
+**Interpretation (inferred):** the follower and arm do not behave as one
+rigid inertia. Compliance or a resonance between motor and arm (a
+flexible coupling, a flexing arm, or the clamp) would give
+current-without-acceleration and a low R². It is consistent with A4's
+G-vs-frequency suspicion.
+
+**Verdict: C2 FAIL** on free motion under vigorous swings. Static
+accuracy is unaffected (G-independent). C2 run 2, the static holds, has
+not been run yet.
+
+**Proposed fix (needs the user):**
+
+1. **Ask the user** what the new arm is: mass, material, how it is
+   attached (rigid hub vs flexible coupling), and whether it flexes.
+2. **Re-identify the follower plant on the current hardware** within its
+   limited range.
+   - A new host script: a small position hold (PD) around a mid angle
+     plus a ±0.05 A current chirp, 1–50 Hz, about 20 s, travel ±50
+     counts.
+   - Fit G(f) = A(f)/I(f) from `iq_meas` and the LS acceleration.
+   - This is the A4b chirp, adapted for limited travel.
+3. **Then update the estimator** (G, and G(f) if needed: e.g. a
+   low-pass on the acceleration path matching the measured roll-off),
+   and rerun C2.
+4. **Re-run A2 on this arm if possible.** The bang-bang test needs free
+   rotation, so it may not fit the limited range.
+
+---
+
+## 2026-10-25: Follower arm identified (user): 22.5 cm stainless chopstick, 9 g, hot-glued to a shaft mount
+
+**Inertia check (inferred from measurements):**
+
+| | G (counts/s² per A) | α (rad/s² per A) | J = Kt / α |
+|---|---|---|---|
+| A2, old link | 9.025e6 | 14,137 | **4.6e-6 kg·m²** |
+| C2, new arm | 0.79e6 | 1,241 | **5.2e-5 kg·m²** |
+| Added by the arm | | | **about 4.7e-5 kg·m²** |
+
+- A 9 g, 22.5 cm rod about its centre is m·L²/12 = 3.8e-5 kg·m².
+- The measured value matches a pivot about 3 cm off the rod's centre:
+  0.009·(L²/12 + d²) gives d ≈ 3.1 cm. Or the mount and glue add a
+  little.
+- So the arm is about 10× the rotor's inertia.
+
+**Implications (inferred):**
+
+- **Hot-glue joint compliance** and the rod's bending, combined with that
+  inertia, give low resonances (a few to a few tens of Hz). That matches
+  where A4 and C2 saw current that does not match acceleration
+  (7–35 Hz), and C2's R² of 0.72.
+- **Imbalance:** a pivot offset of about 3 cm gives gravity of about
+  m·g·d ≈ 2.7 mN·m (≈ 40 mA) versus angle.
+  - The earlier "not gravity" conclusion was too strong. The fitted 1/rev
+    term (73 mA) had a phase contaminated by direction-of-travel
+    correlation. C1's rest region (raw 2774–3052) may lie near the
+    gravity null.
+  - Measure gravity directly (quasi-static holds at several angles)
+    before modelling it.
+- **No benefit from the length:** contact is at about 4 cm, so the
+  22.5 cm length adds inertia, imbalance and bending without improving
+  force sensing.
+
+**Recommendation (awaiting the user's decision):**
+
+- Replace the arm with a short (about 5 cm), light (about 2 g), stiff
+  arm. That adds about 2e-6 kg·m², about 1.4× the original total
+  inertia instead of 11×.
+- Fix it rigidly (set-screw or clamp hub, or epoxy; not hot glue), and
+  roughly balance it.
+- Then re-identify the plant with a limited-range chirp (new script),
+  and rerun C2.
+- **Alternative:** keep the chopstick but epoxy it, then identify and
+  compensate G, gravity and resonance in the estimator. More work, and
+  less robust.
+
+---
+
+## 2026-10-25: New 3D-printed follower arm (r = 75.7 mm) — plant re-identified; C2 free floor 23 mA (offline replay)
+
+**Hardware (user):** a 3D-printed arm replaces the chopstick. Contact
+radius is 75.7 mm from the centre of rotation, so force at the tip =
+0.853 N/A (Kt 64.6 mN·m/A), and 0.119 mm of tip travel per count. The
+arm could now turn freely: 13.8 rev in this run. Teleop's
+`SHADOW_R_CONTACT_M` was updated to 0.0757.
+
+**`plant_id.py`** (new; limited-range PD hold plus a 1–50 Hz current
+chirp, then G(f)):
+
+- Validated in simulation: the pipeline is exact without friction (7-frame
+  kernel: 2.9–3.0e6 flat to 40 Hz against a true 3.0e6).
+- **It fails with realistic stiction:** 20 mA of Coulomb friction → G −18 %;
+  40 mA → off by 16×. The held shaft sticks.
+- **Not used on hardware.** The limitation is documented in its docstring.
+
+**Run:** C2 free motion on the new arm.
+`TELEOP_FRAME_QUEUE=1 TELEOP_SHADOW_TAU_ENV=1 timeout -s INT 70 taskset -c 2,3 python3 teleop_test.py`
+from `/dev/shm/c2/free_arm3d`, with the user swinging vigorously.
+
+- **Logs:** `logs/C2_free_arm3d.csv` + `_frames`.
+- 0 missing frames; loop p95 2.06 ms, max 27.9 ms.
+- Follower range 55,226 counts (13.8 rev); |v| rms 13,711 counts/s;
+  |a| rms 3.8e5 counts/s²; raw current rms 105.9 mA.
+
+**Plant fit** (centred 15-frame LS for v and a, moving frames |v| > 1,500
+counts/s, 60 % of the time):
+
+| Model | G_eff (counts/s² per A) | Coulomb | Viscous | Gravity | R² |
+|---|---|---|---|---|---|
+| a + friction | **3,847,031** | 24.4 mA | 3.3 mA/10k | — | **0.934** |
+| + 1/rev gravity | 3,864,074 | 23.9 | 3.5 | **12.9 mA** | 0.938 |
+
+| Arm | G | R² |
+|---|---|---|
+| A2 link | 9.0e6 | — |
+| Chopstick (hot-glued) | 0.79e6 | 0.72 |
+| **3D-printed** | **3.85e6** | **0.93** |
+
+- Inertia about 2.3× the original link.
+- Close to a rigid single inertia, and nearly balanced.
+
+**Estimator replay** (`c1_eval.estimate`, 3 ms current alignment; friction
+and gravity fitted on the first half, tested on the second):
+
+| G | Estimate rms (whole run) | Held-out half raw → with friction + gravity |
+|---|---|---|
+| 9.025e6 (A2) | 56.3 mA (p99 171) | 52.0 → 48.0 mA |
+| **3.85e6** | 37.0 mA (p99 79) | 30.2 → **23.0 mA (p99 63)** |
+
+- **Held-out residual by |a|:** 21.8 (< 1e5), 24.5 (1e5–3e5), 21.2
+  (3e5–1e6), 33.3 mA (> 1e6, 4.4 % of the time). **Inertia is now
+  cancelled** (flat versus acceleration).
+- **At rest** (v = 0, 18 % of the time): 18.7 mA. That is stiction
+  holding part of the commanded current while stationary; it is
+  indistinguishable from external torque without motion (inferred). It
+  is the main barrier to the brief's 15 mA.
+
+**Verdict:** with the new arm's model, the vigorous free floor is **23 mA
+held-out: Gate A (≤ 25 mA) PASS; brief (< 15 mA) not met.** This is an
+offline replay. The live shadow still uses A2's G (it read high).
+
+**Next:**
+
+1. A fitted follower model file (G, friction, gravity) loaded by teleop's
+   shadow estimator.
+2. C2 rerun live: free motion plus static holds on the rigid surface.
+3. Later: a stiction-aware dead band in the felt path, so static
+   friction is not felt as contact.
+
+---
+
+## 2026-10-25: Follower model file + live shadow uses it (C2 code)
+
+**Code:**
+
+- **`fit_follower_model.py <frames.csv> [--out]`** fits two things:
+  - **G** by LS on moving frames;
+  - **friction + gravity terms** on the estimator's own output: offset,
+    Coulomb, low-speed, viscous, cos/sin θ.
+
+  It saves JSON with a held-out check.
+- **Fitted on `logs/C2_free_arm3d_frames.csv`:** G = 3,847,031 (R²
+  0.934). Coeffs: offset −1.7, Coulomb +24.5, low-speed −26.9,
+  viscous +2.3 per 10k, gravity cos −13.5, sin −2.4 mA. Held-out 30.2 →
+  23.0 mA.
+- **Files:** `logs/follower_model.json` (git-ignored), plus a **tracked
+  copy, `follower_model_arm3d.json`**, next to the scripts.
+- **`teleop_test.py`:** `TELEOP_FOLLOWER_MODEL=<json>` (with
+  `TELEOP_SHADOW_TAU_ENV=1`). The shadow estimator uses the model's G and
+  subtracts `fit_follower_model.model_terms()`. Unset leaves the C1
+  estimator unchanged.
+
+**Live-path check, offline:** the recorded `C2_free_arm3d` frames were
+replayed in real time through teleop with a fake CAN interface (15 s
+starting 20 s in).
+
+| Path | tau_env rms | p99 |
+|---|---|---|
+| Live path | 35.4 mA | 182 mA |
+| Offline estimator, same window, same cold start | 36.1 mA | 189 mA |
+
+- **The live code matches.** That window is the most vigorous stretch
+  (|v| rms 20,322 counts/s, about 5 rev/s, against 13,711 for the whole
+  run). So the floor depends on motion intensity: about 23 mA over the
+  whole held-out half, about 36 mA in the most violent 15 s.
+
+**Next:** C2 live rerun with the model: free motion plus static holds on
+the rigid surface, at r = 75.7 mm.
 
 ---
 

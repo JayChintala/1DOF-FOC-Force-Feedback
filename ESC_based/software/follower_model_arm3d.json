@@ -1,0 +1,18 @@
+{
+ "G_cnt_s2_per_A": 3847030.695243248,
+ "fc_hz": 20.0,
+ "align_frames": 3,
+ "vs_cnt_s": 1500.0,
+ "coeffs_A": {
+  "offset": -0.0017343550996379417,
+  "coulomb": 0.024506778441542868,
+  "lowspeed": -0.026938255856939312,
+  "viscous_per_10k": 0.002256139809039112,
+  "grav_cos": -0.013522028425870913,
+  "grav_sin": -0.0024262299845553724
+ },
+ "source": "logs/C2_free_arm3d_frames.csv",
+ "plant_r2": 0.9336668233444065,
+ "heldout_rms_A": 0.023000747749024053,
+ "note": "motor-side amps; tau_env = -(observer - terms)"
+}
