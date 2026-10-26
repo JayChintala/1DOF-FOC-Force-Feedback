@@ -19,7 +19,7 @@ firmware on both B-G431B-ESC1 boards. Newest entries at the bottom.
 | B7 | **PASS (levels 1–6)**: Kt = 64.6 mN·m/A at r ≈ 160 mm (−2 % vs nominal). The 4 cm rerun confirms the scaling (3×, rig wobble). Motor mount not rigid: clamp it before Phase C data |
 | C1 | **Gate A PASS (offline)**: free 10.3 mA (gentle motion), static ≤ 2.8 %, sign settled, rigid ≥ 6 N/mm vs foam ≈ 0.3 N/mm |
 | C2 | **PASS (live, 3D-printed arm, fitted model)**: free floor 19.1 mA (contact excluded; brief's 15 mA not met), static ≤ 5.0 %, loop p95 2.09 ms |
-| C3 | **Operating point K_F 1.0, KB_DAMP 0.5e-5, DB 20 mA**: stable, free felt 35.9 mA (target 34.7), user "felt better". KB 0.25e-5 oscillated in contact (stopped). Contact capped by the about 0.8 A ceiling. Tap rise TBD (taps-only run) |
+| C3 | **Operating point K_F 1.0, KB_DAMP 0.35e-5, DB 20 mA**: free felt 18.7 mA (PASS), tap rise median 4 ms (PASS), user "light and responsive" with maybe one oscillation (marginal). Fallback KB 0.5e-5. Contact capped by the about 0.8 A ceiling |
 
 **Blocker for closed-loop work:** host stalls of up to 2 s.
 
@@ -2976,6 +2976,90 @@ KB_DAMP = 0.5e-5, dead band 20 mA.
 - A taps-only run for the rise time.
 - Leader stiction compensation.
 - Then C4 (anchor).
+
+---
+
+## 2026-10-25: C3 taps-only run (operating point) and KB_DAMP 0.35e-5 run
+
+**1. Taps only** (K_F 1.0, KB_DAMP 0.5e-5, dead band 20 mA, 30 s).
+
+- **Logs:** `logs/C3_taps_op.csv` + `_frames` + `.png`.
+- 0 missing frames; loop p95 2.07 ms, max 30.7 ms.
+- 33 onsets, all short (above 50 % of peak for ≤ 200 ms); median impact
+  speed 18,434 counts/s.
+- **Felt 10–90 % rise: median 4.0 ms** (p25 4.0, p75 34.0). Against
+  ≤ 30 ms: **PASS**.
+  - The fast rise is physical: at impact the deceleration enters through
+    the estimator's (unfiltered) inertia term, i.e. impact force = J·a
+    (inferred).
+- Peaks: median 505 mA, CV 43 %. D3's "within 20 %" needs deliberately
+  uniform taps.
+
+**2. KB_DAMP 0.35e-5** (K_F 1.0, dead band 20 mA, full routine).
+
+- **Logs:** `logs/C3_kf100_kb3.5e-6.csv` + `_frames` + `.png`.
+- 0 missing frames; loop p95 2.07 ms, max 28.0 ms.
+
+**Free felt current across the damping steps:**
+
+| KB_DAMP | Free iq_b_cmd rms (felt + damping) | Free share of time, \|v_b\| rms | Contact felt rms | Largest 5–60 Hz burst | User |
+|---|---|---|---|---|---|
+| 0.5e-5 | 35.9 mA (12.5 + 32.6) | 7 %, 6,510 | 508 mA | 115 mA at 6 Hz | "felt better" |
+| **0.35e-5** | **18.7 mA (8.8 + 15.2): PASS** | 12 %, 4,329 (gentler) | 439 mA | 275 mA at 6 Hz | "light and responsive", "very minor" ramp-up, "maybe one instance of oscillation"; felt slightly better than the 0.5e-5 taps run |
+| 0.25e-5 | 14.6 mA (6.5 + 12.8) | 33 %, 5,106 | 429 mA | 194 mA at **50 Hz** (67 % contact) | "some oscillations" |
+
+**About the burst metric:**
+
+- The largest-burst metric is **not discriminating**: 5–6 Hz bursts are
+  the operator's own tapping/pressing rhythm.
+- Only the 0.25e-5 run's 50 Hz burst in contact looks like genuine
+  chatter.
+- Before Phase D, build an oscillation detector that separates operator
+  motion (leader velocity content) from the loop's response, e.g.
+  coherence between v_b and iq_b_cmd above 10 Hz. **Until then, the
+  user's report decides stability.**
+
+---
+
+## 2026-10-25: C3 conclusion — operating point K_F 1.0, KB_DAMP 0.35e-5, dead band 20 mA
+
+**User feedback on the 0.35e-5 run:** "light and responsive", a "very
+minor" ramp-up, "maybe one instance of oscillation"; felt slightly better
+than the preceding run (assumed to mean the 0.5e-5 taps-only run).
+
+**Operating point (user's preference):**
+
+```
+TELEOP_FRAME_QUEUE=1 TELEOP_SHADOW_TAU_ENV=1 TELEOP_FOLLOWER_MODEL=follower_model_arm3d.json
+TELEOP_FELT_SOURCE=tau_env TELEOP_K_F=1.0 TELEOP_FELT_DEADBAND_A=0.02 TELEOP_KB_DAMP=0.35e-5
+TELEOP_LOG_DIR=/dev/shm/teleop_c3
+```
+
+- **Conservative fallback:** `TELEOP_KB_DAMP=0.5e-5`.
+- 0.25e-5 oscillated in contact.
+
+| C3 criterion | Result | Verdict |
+|---|---|---|
+| Free felt current ≤ 30 % of A1 (≤ 34.7 mA) | 18.7 mA | **PASS** |
+| Tap rise ≤ 30 ms | median 4.0 ms (taps-only run, at 0.5e-5) | **PASS** |
+| No 5–40 Hz peak > 10 dB above 0.3–3 Hz | whole-run metric passes at all steps; user felt "maybe one instance" at 0.35e-5 | **marginal** (near the stability edge) |
+| No watchdog trips | none in any C3 run | **PASS** |
+
+**Remarks:**
+
+- **The "minor ramp-up"** is consistent with the estimator's 20 Hz LPF:
+  a steady push takes roughly 15–20 ms to fully appear. Taps are faster
+  because impact enters through the unfiltered inertia term (inferred).
+  The estimator bandwidth could be raised at the cost of noise.
+- **Peak contact force is limited by the about 0.8 A current ceiling**
+  (about 52 mN·m at the leader).
+- **Open before Phase D:**
+  1. A proper oscillation detector (separate operator motion from loop
+     response).
+  2. Tap rise re-checked at 0.35e-5.
+  3. Leader stiction compensation (about 60 mA) to sharpen light
+     contacts.
+  4. C4 (bounded leaky position anchor).
 
 ---
 
