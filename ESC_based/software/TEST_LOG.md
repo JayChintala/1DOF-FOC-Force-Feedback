@@ -19,7 +19,7 @@ firmware on both B-G431B-ESC1 boards. Newest entries at the bottom.
 | B7 | **PASS (levels 1–6)**: Kt = 64.6 mN·m/A at r ≈ 160 mm (−2 % vs nominal). The 4 cm rerun confirms the scaling (3×, rig wobble). Motor mount not rigid: clamp it before Phase C data |
 | C1 | **Gate A PASS (offline)**: free 10.3 mA (gentle motion), static ≤ 2.8 %, sign settled, rigid ≥ 6 N/mm vs foam ≈ 0.3 N/mm |
 | C2 | **PASS (live, 3D-printed arm, fitted model)**: free floor 19.1 mA (contact excluded; brief's 15 mA not met), static ≤ 5.0 %, loop p95 2.09 ms |
-| C3 | K_F ramp to 1.0 and KB_DAMP 2e-5 → 0.5e-5: all stable. Free felt current 79.8 → 35.9 mA (target 34.7); contact about 27× damping. User: contact only "a bit better". Tap rise about 36 ms |
+| C3 | **Operating point K_F 1.0, KB_DAMP 0.5e-5, DB 20 mA**: stable, free felt 35.9 mA (target 34.7), user "felt better". KB 0.25e-5 oscillated in contact (stopped). Contact capped by the about 0.8 A ceiling. Tap rise TBD (taps-only run) |
 
 **Blocker for closed-loop work:** host stalls of up to 2 s.
 
@@ -2902,7 +2902,80 @@ The `model_terms` scalar fast path is in.
 
 Stable at every step.
 
-- **User feel report:** (pending)
+- **User feel report:** "it felt better, but the contact force topped out
+  quickly."
+
+**Current ceiling check** (measured ÷ commanded, C3 logs):
+
+| \|cmd\| | Leader (B) | Follower (A) |
+|---|---|---|
+| 0.2–0.6 A | 0.99–1.00 | 0.99–1.02 |
+| 0.6–0.8 A | 0.98 | 0.96–0.98 |
+| 0.8–0.95 A | 0.94–0.97 (about 0.79 A delivered) | 0.89 (about 0.76 A) |
+| ≥ 0.95 A | 0.66 (0.66 A) | 0.77–0.82 (about 0.76–0.80 A) |
+
+- **Delivered current saturates at about 0.8 A,** consistent with B7
+  (0.675 A measured at 0.8 A commanded at stall).
+- Felt torque ceiling ≈ 0.8 × 64.6 ≈ **52 mN·m**. The follower's push is
+  capped at about 0.76 A ≈ 0.65 N at its 75.7 mm tip.
+- At K_F = 1.0, contact already reaches the ceiling. **More gain only
+  reaches it sooner.** More felt force needs mechanics: a shorter lever
+  at the leader grip, or a stronger motor or supply.
+- Whether the ceiling is the user's firmware limit or current-loop
+  voltage headroom is not determined (inferred either way).
+
+---
+
+## 2026-10-25: C3 damping step 3 (KB_DAMP 0.25e-5) — user felt oscillations; stop per the brief
+
+**Run:** `TELEOP_K_F=1.0 TELEOP_KB_DAMP=0.25e-5`, other flags as before.
+
+- **Logs:** `logs/C3_kf100_kb2.5e-6.csv` + `_frames` + `.png`.
+- 0 missing frames; loop p95 2.07 ms, max 28.6 ms.
+
+| | Free | Contact |
+|---|---|---|
+| Felt term | 6.5 mA rms | 429 mA rms |
+| Leader damping | 12.8 mA rms | 9 mA rms |
+| **Total iq_b_cmd (free)** | **14.6 mA rms: PASS** vs ≤ 34.7 mA | — |
+
+- Contact 25 %, free 33 % of the time.
+- **Whole-run ringing metric:** −16.9 dB, which does *not* flag it.
+- **User feel report:** "felt good, some oscillations."
+
+**Windowed search** (0.5 s windows, the 5–60 Hz part of iq_b_cmd):
+
+| KB_DAMP | Bursts |
+|---|---|
+| **0.25e-5** | **78 mA at 16 Hz at t ≈ 33 s (58 % in contact)**; 45 mA at 14 Hz (t 8 s); 30 mA at 32 Hz (in contact) |
+| 0.5e-5 | 65 mA at 28 Hz (in contact), 77 mA at 8 Hz (t 22 s, mostly free); not felt by the user |
+
+- **Interpretation (inferred):** contact chatter. With little leader
+  damping, the arm bounces against the object instead of settling. The
+  whole-run PSD averages it away.
+- **For future runs:** judge ringing with the windowed metric (burst
+  amplitude in contact), not the whole-run PSD.
+
+**Verdict: STOP lowering KB_DAMP** (brief: stop at the first sign of
+ringing).
+
+**C3 operating point** (stable, user "felt better"): K_F = 1.0,
+KB_DAMP = 0.5e-5, dead band 20 mA.
+
+| Criterion | At the operating point |
+|---|---|
+| Free felt current | 35.9 mA vs ≤ 34.7: essentially at target; marginal FAIL by 1.2 mA |
+| Stability | no ringing felt or flagged |
+| Contact | about 27× damping, but limited by the about 0.8 A current ceiling |
+| Tap rise | about 36 ms (K_F 1.0, KB 2e-5) on mixed presses and taps; a taps-only run is needed |
+
+**Options:**
+
+- Try KB_DAMP ≈ 0.35e-5 to pass the free-current target with margin to
+  the oscillation (optional).
+- A taps-only run for the rise time.
+- Leader stiction compensation.
+- Then C4 (anchor).
 
 ---
 
