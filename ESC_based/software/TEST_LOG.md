@@ -3,7 +3,7 @@
 Running log of the Phase A–D plan, run on the Pi against the ESC_based
 firmware on both B-G431B-ESC1 boards. Newest entries at the bottom.
 
-## TL;DR (updated 2026-10-20, end of session; paused by the user)
+## TL;DR (updated 2026-10-25, end of C3)
 
 **Status:** Phase A done; B mostly done; **C1–C3 done** (C3 operating point found); C4 and Phase D next. See "0a. RESUME HERE".
 
