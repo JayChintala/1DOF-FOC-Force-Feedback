@@ -5,7 +5,7 @@ firmware on both B-G431B-ESC1 boards. Newest entries at the bottom.
 
 ## TL;DR (updated 2026-10-20, end of session; paused by the user)
 
-**Status:** Phase A done; Phase B partly done.
+**Status:** Phase A done; B mostly done; **C1–C3 done** (C3 operating point found); C4 and Phase D next. See "0a. RESUME HERE".
 
 | Step | Status |
 |---|---|
@@ -3092,6 +3092,118 @@ cold. The original plan is the user's "sensorless force-feedback
 improvement plan" brief, Phases A–D. Its steps, pass thresholds and
 rules are restated below where they matter. Everything here was checked
 against the code and the logs above.
+
+### 0a. RESUME HERE (current state, 2026-10-25, end of C3) — supersedes the table in 0
+
+**Done:**
+
+- **Phase A.**
+- **B1–B4.** B4 firmware flashed with the 20 ms host timeout; B5
+  dropped.
+- **B7:** Kt 64.6 mN·m/A.
+- **Host stalls fixed:** the RT priority file plus `TELEOP_LOG_DIR`
+  (logs to RAM).
+- **New 3D-printed follower arm,** r = 75.7 mm: G = 3.85e6, model in
+  `follower_model_arm3d.json`.
+- **C1 PASS** (Gate A). **C2 PASS live** (free 19.1 mA, static ≤ 5 %).
+- **C3 concluded** (operating point below).
+
+**Not done / open:**
+
+- **B6** (ripple): superseded in practice. The chirp ID is unreliable
+  with stiction, and the teleop-data model works.
+- **B2/B3 live flags** (`TELEOP_VEL_ESTIMATOR`, `TELEOP_OBSERVER`): not
+  trialled live; the C3 path does not use them.
+- Leader stiction compensation, an oscillation detector, C4, and
+  Phase D.
+
+**Operating point (C3):**
+
+```
+cd ESC_based/software
+TELEOP_FRAME_QUEUE=1 TELEOP_SHADOW_TAU_ENV=1 TELEOP_FOLLOWER_MODEL=follower_model_arm3d.json \
+TELEOP_FELT_SOURCE=tau_env TELEOP_K_F=1.0 TELEOP_FELT_DEADBAND_A=0.02 TELEOP_KB_DAMP=0.35e-5 \
+TELEOP_LOG_DIR=/dev/shm/teleop timeout -s INT 60 taskset -c 2,3 python3 teleop_test.py
+```
+
+- Fallback: `TELEOP_KB_DAMP=0.5e-5`.
+- **Refit the follower model** (`fit_follower_model.py` on a vigorous,
+  contact-free frames log) **whenever the follower arm or mount changes.**
+- After any ESC power cycle: `bus_check.py`, then `zero_iq_check.py`
+  with the arm free to swing about 45°.
+
+**Next, in the user's priority order (feel first):**
+
+1. **Leader stiction compensation:** measure the leader's breakaway and
+   running friction; add a flagged feed-forward, starting at about half
+   the measured friction.
+2. Optional: estimator bandwidth 20 → 30 Hz (shorter ramp-up; more
+   noise).
+3. **Oscillation detector:** separate operator motion from loop ringing,
+   e.g. v_b vs iq_b_cmd coherence above 10 Hz.
+4. **C4 anchor.**
+5. **Phase D** (fixtures, a helper for D4). Restate force thresholds in
+   torque for this geometry.
+
+**Hardware limits that bound the feel:**
+
+- Delivered current saturates at about 0.8 A, so at most about
+  52 mN·m at the leader.
+- Leader stiction about 60 mA.
+- See the gearbox design note below for options.
+
+### Design note (2026-10-25): a gearbox for more strength vs torque transparency
+
+Question from the user. The analysis uses this rig's measured numbers;
+the transmission figures are typical values, i.e. inferred.
+
+**What a ratio N does:**
+
+- **Output torque:** ×N. The 0.8 A ceiling becomes about 52·N mN·m.
+- **Reflected motor inertia:** ×N². The rotor is about 4.6e-6 kg·m²
+  (from A2's G), and the current arm adds about 6e-6.
+  - At N = 3, the rotor alone reflects 4.1e-5 kg·m², about the
+    chopstick's inertia, which C2 showed hurts the estimator badly.
+  - At N = 10 it is 4.6e-4 kg·m².
+  - The leader feels heavier, and the follower's G falls by about N².
+- **Encoder resolution at the output:** ×N (a benefit: 4000·N counts per
+  output revolution).
+- **Friction and backlash, which depend on the transmission type:**
+  - **Spur or planetary gearbox:** backlash (a dead zone between motor
+    shaft and output, while the encoder is on the motor side);
+    load-dependent mesh friction, often 5–20 % of rated torque;
+    efficiency that differs forward vs back-driven.
+  - **Capstan or cable drive:** no backlash; about 95–98 % efficient;
+    low, mostly constant friction.
+  - **Timing belt:** near-zero backlash, low friction, some compliance.
+
+**Effect on this project's goal** (sensorless external torque = current
+not explained by motion):
+
+- **Standard planetary or spur gearbox: not recommended.**
+  - **Friction:** mesh friction is load-dependent and hysteretic, so it
+    adds an error that scales with contact force. That breaks D1's 10 %
+    static accuracy; today the static error is ≤ 5 % without gears.
+  - **Backlash:** it makes the encoder (motor side) disagree with the
+    output position, which corrupts the acceleration term and the
+    stiffness (D2).
+  - **Inertia:** N² inertia must be cancelled far more precisely, and
+    C2 showed the floor grows with uncancelled inertia.
+- **Low-ratio (2–4:1) zero-backlash transmission: viable.** A capstan or
+  cable drive, or a timing belt, is the standard choice in haptic
+  devices. Torque doubles to quadruples. Inertia grows 4–16×, but with
+  constant, identifiable friction the estimator model (G, Coulomb,
+  viscous) can still be fitted the same way.
+  - **Cost:** the leader feels heavier unless its inertia is
+    compensated, and the follower's model must be refitted.
+- **Cheaper levers first:**
+  - **Grip lever:** a shorter lever where the operator holds the leader
+    gives more force at the fingers for the same torque (F = τ/r), for
+    free.
+  - **The 0.8 A ceiling itself:** find whether it is the firmware limit
+    the user mentioned or the supply voltage. If the motor's thermal
+    rating allows, raising it (dev machine) gives more torque with no
+    transparency cost.
 
 ### 0. Resume here (state at the end of the 2026-10-20 session)
 
