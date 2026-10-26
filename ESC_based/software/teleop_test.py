@@ -130,6 +130,7 @@ import time
 from can_interface import MotorCANInterface
 import collections
 import json
+import shutil
 
 from estimators import AlphaBetaVelocity, ExternalTorqueObserver, HandTorqueObserver
 from fit_follower_model import model_terms
@@ -466,6 +467,30 @@ STALE_WARN_EVERY_S = 1.0
 PRINT_EVERY_S = 0.1     # throttle console output so it can't bottleneck the loop
 
 LOG_DIR = "logs"
+# Host-stall fix (confirmed 2026-10-22: SD-card write() calls block the main
+# loop for up to 1.6 s). With TELEOP_LOG_DIR set (e.g. /dev/shm/teleop) the
+# CSVs are written there during the run -- RAM, no SD stalls -- and moved,
+# with the plot, into LOG_DIR at exit under the usual unique name. Unset =
+# write straight to LOG_DIR as before.
+LIVE_LOG_DIR = os.environ.get("TELEOP_LOG_DIR", "")
+
+# C3: what the operator feels on Motor B.
+#   "iq_a_filt" (default) = FEEDBACK_GAIN * EMA(follower measured current), the
+#                           original path (2.8 Hz filter; in contact it echoes
+#                           the follower's own push, see TEST_LOG A1).
+#   "tau_env"             = FELT_K_F * shadow external-torque estimate (20 Hz,
+#                           validated live in C2), minus KB_DAMP * vel_b.
+#                           In a static press tau_env = -iq_a, so at K_F = 1 it
+#                           matches the old path's static force; in free
+#                           motion it is ~0 instead of the follower's own
+#                           inertia + friction current.
+# FELT_DEADBAND_A: soft dead band on tau_env before it is felt (|x| <= DB ->
+# 0, else sign(x)*(|x| - DB)), to keep stiction-held current (up to ~20 mA
+# at rest in C2) from being felt as contact. 0 = off.
+# Overrides: TELEOP_FELT_SOURCE=tau_env TELEOP_K_F=0.25 TELEOP_FELT_DEADBAND_A=0.02
+FELT_SOURCE = os.environ.get("TELEOP_FELT_SOURCE", "iq_a_filt")
+FELT_K_F = float(os.environ.get("TELEOP_K_F", "0.25"))
+FELT_DEADBAND_A = float(os.environ.get("TELEOP_FELT_DEADBAND_A", "0"))
 
 
 def clamp(value, lo, hi=None):
@@ -482,6 +507,17 @@ def main():
     while os.path.exists(log_path):
         log_path = os.path.join(LOG_DIR, f"{base_name}_{suffix}.csv")
         suffix += 1
+    final_log_path = log_path
+    if LIVE_LOG_DIR:
+        os.makedirs(LIVE_LOG_DIR, exist_ok=True)
+        log_path = os.path.join(LIVE_LOG_DIR, os.path.basename(final_log_path))
+    if FELT_SOURCE not in ("iq_a_filt", "tau_env"):
+        raise SystemExit(f"TELEOP_FELT_SOURCE={FELT_SOURCE!r}: use iq_a_filt or tau_env")
+    if FELT_SOURCE == "tau_env" and not (SHADOW_TAU_ENV and FOLLOWER_MODEL_PATH):
+        raise SystemExit("TELEOP_FELT_SOURCE=tau_env needs TELEOP_SHADOW_TAU_ENV=1 and "
+                         "TELEOP_FOLLOWER_MODEL (the C2-validated estimator)")
+    if not 0.0 <= FELT_K_F <= 1.0:
+        raise SystemExit("TELEOP_K_F must be in [0, 1] (C3 ramps 0.25 -> 0.5 -> 1.0)")
 
     # pair_dbg=False releases each frame on arrival; pairing with the 10 Hz
     # direct-mode DBG would hold every record ~1 ms for nothing.
@@ -620,6 +656,9 @@ def main():
               + (f"/G {OBS_G_SOURCE}/dt {OBS_DT_SOURCE}" if hand_obs else "")
               + (", shadow tau_env on" if SHADOW_TAU_ENV else "")
               + (f" with model {FOLLOWER_MODEL_PATH} (G {shadow_g:,.0f})" if follower_model else "") + ")")
+        print(f"Felt force: {FELT_SOURCE}" + (f", K_F {FELT_K_F:g}, dead band {FELT_DEADBAND_A * 1e3:g} mA"
+                                              if FELT_SOURCE == "tau_env" else "")
+              + (f"; logging live to {LIVE_LOG_DIR}, moved to {LOG_DIR}/ at exit" if LIVE_LOG_DIR else ""))
         print("Spin B; A should follow. Hold A; feel resistance in B. Ctrl+C to stop.\n")
 
         dt = 1.0 / CONTROL_RATE_HZ
@@ -811,7 +850,13 @@ def main():
                 iq_b_cmd = clamp(-KB_DAMP * vel_b_filt, IQ2_MAX_A)
             else:
                 iq_a_filt = IQ_FILTER_ALPHA * iq_a + (1 - IQ_FILTER_ALPHA) * iq_a_filt
-                iq_b_cmd = clamp(FEEDBACK_GAIN * iq_a_filt - KB_DAMP * vel_b_filt, IQ2_MAX_A)
+                if FELT_SOURCE == "tau_env":
+                    x = tau_env
+                    if FELT_DEADBAND_A > 0:
+                        x = math.copysign(max(0.0, abs(x) - FELT_DEADBAND_A), x)
+                    iq_b_cmd = clamp(FELT_K_F * x - KB_DAMP * vel_b_filt, IQ2_MAX_A)
+                else:
+                    iq_b_cmd = clamp(FEEDBACK_GAIN * iq_a_filt - KB_DAMP * vel_b_filt, IQ2_MAX_A)
             b.send_set_iq(iq_b_cmd)
 
             t_rel = now - start_time
@@ -917,8 +962,16 @@ def main():
                   f"{100 * frac_b:.1f}% for B ({loop_hz * frac_b:.0f} Hz).")
             print("Firmware sends ENC_COUNT at 1000 Hz -- a large shortfall here "
                   "is dropped/late telemetry, not a slow shaft.")
-            print(f"Log saved: {log_path}")
             png_path = plot_teleop_log(log_path)
+            if LIVE_LOG_DIR:
+                # Off the live path now: move RAM logs to their final place.
+                moved = [shutil.move(src, os.path.join(LOG_DIR, os.path.basename(src)))
+                         for src in (log_path, log_path[:-4] + "_frames.csv", png_path)
+                         if src and os.path.exists(src)]
+                log_path = final_log_path
+                png_path = next((m for m in moved if m.endswith(".png")), None)
+                print(f"Moved {len(moved)} file(s) from {LIVE_LOG_DIR} to {LOG_DIR}/")
+            print(f"Log saved: {log_path}")
             if png_path:
                 print(f"Plot saved: {png_path}")
 

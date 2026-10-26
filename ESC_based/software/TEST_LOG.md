@@ -2701,6 +2701,49 @@ TELEOP_FOLLOWER_MODEL=follower_model_arm3d.json`, from `/dev/shm/c2/...`
 
 ---
 
+## 2026-10-25: C3 preparation (offline): RAM logging in code, felt-force switch, dead band
+
+**Code (`teleop_test.py`, all flagged; defaults unchanged):**
+
+- **`TELEOP_LOG_DIR=<dir>`** fixes the confirmed SD-write stalls. The CSVs
+  (main + frames) are written to `<dir>` during the run, e.g.
+  `/dev/shm/teleop`. At exit they and the plot are moved into `logs/`
+  under the usual unique name. This replaces the run-from-`/dev/shm`
+  workaround.
+- **`TELEOP_FELT_SOURCE=tau_env`** (default `iq_a_filt`) sets the felt
+  command `iq_b_cmd = clamp(K_F · deadband(tau_env) − KB_DAMP · v_b)`.
+  - It requires `TELEOP_SHADOW_TAU_ENV=1` and `TELEOP_FOLLOWER_MODEL`.
+  - `TELEOP_K_F` defaults to 0.25 and must be in [0, 1].
+  - `TELEOP_FELT_DEADBAND_A` defaults to 0: a soft dead band,
+    |x| ≤ DB → 0, else sign·(|x| − DB).
+  - The 2.8 Hz `IQ_FILTER` is bypassed on this path (the estimator is
+    20 Hz).
+
+**Sign/scale check on recorded data** (`C2_live_holds`, `C2_live_free`):
+
+- **Static holds** (1,202 rows): new felt term at K_F = 1 (`tau_env`) vs
+  old (`FEEDBACK_GAIN·iq_a_filt`): **sign agreement 100 %, median ratio
+  1.01.** So at K_F = 1 the static felt force equals the old path's.
+- **Free motion, contact excluded:** old felt term rms 38 mA vs new 19 mA
+  at K_F = 1, i.e. **4.8 mA at K_F = 0.25.**
+- **Note:** the leader's own damping, KB_DAMP·v_b, is in iq_b_cmd for
+  both paths and dominates under vigorous motion (2e-5 × 10,000 counts/s
+  = 0.2 A). C3 will report the felt term and the damping separately.
+
+**Smoke test** (recorded frames replayed through teleop via a fake CAN
+interface, with all of: `TELEOP_FELT_SOURCE=tau_env`, `TELEOP_K_F=0.25`,
+`TELEOP_FELT_DEADBAND_A=0.02`, `TELEOP_LOG_DIR=/dev/shm/teleop_smoke`):
+
+- 500 Hz.
+- 3 files moved to `logs/`; the RAM dir was left empty.
+- iq_b_cmd equals 0.25·deadband(tau_env) − KB_DAMP·vel_b to within
+  0.06 mA (log rounding).
+
+**Status of the SD-stall issue:** fixed in code, behind
+`TELEOP_LOG_DIR`. Confirm in the live C3 runs (max loop_dt).
+
+---
+
 ## Phase A summary (2026-10-20)
 
 | Step | Result | Key number |
