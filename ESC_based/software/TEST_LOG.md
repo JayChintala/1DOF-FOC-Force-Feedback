@@ -3200,10 +3200,14 @@ not explained by motion):
   - **Grip lever:** a shorter lever where the operator holds the leader
     gives more force at the fingers for the same torque (F = τ/r), for
     free.
-  - **The 0.8 A ceiling itself:** find whether it is the firmware limit
-    the user mentioned or the supply voltage. If the motor's thermal
-    rating allows, raising it (dev machine) gives more torque with no
-    transparency cost.
+  - **The 0.8 A ceiling: RESOLVED by the user (2026-10-25).** It is the
+    motor's own rating. It "can technically do more, but risks burnout",
+    so do **not** raise the continuous limit.
+    - Possible later option, needing the motor's thermal data: a firmware
+      I²t budget allowing brief peaks above 0.8 A (e.g. for taps) while
+      keeping the RMS ≤ 0.8 A. That is dev-machine work and not planned.
+    - **More strength therefore means:** the grip lever first, then a
+      low-ratio zero-backlash transmission.
 
 ### 0. Resume here (state at the end of the 2026-10-20 session)
 
