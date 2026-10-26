@@ -38,8 +38,17 @@ HALF = 7
 
 
 def model_terms(coeffs, v, count):
-    """Friction + gravity, motor-side amps, for one sample or arrays."""
-    th = 2 * math.pi * (count % ENC) / ENC if np.isscalar(count) else 2 * np.pi * (np.asarray(count) % ENC) / ENC
+    """Friction + gravity, motor-side amps, for one sample or arrays.
+    Scalars take a plain-math path: teleop calls this for every follower
+    frame (1 kHz), and numpy on single floats cost loop time (C3: p95 crept
+    to 2.11 ms)."""
+    if np.isscalar(v) and np.isscalar(count):
+        c = coeffs
+        th = 2 * math.pi * (count % ENC) / ENC
+        sg = (v > 0) - (v < 0)
+        return (c["offset"] + c["coulomb"] * sg + c["lowspeed"] * sg * math.exp(-abs(v) / VS)
+                + c["viscous_per_10k"] * v / 1e4 + c["grav_cos"] * math.cos(th) + c["grav_sin"] * math.sin(th))
+    th = 2 * np.pi * (np.asarray(count) % ENC) / ENC
     s = np.sign(v)
     ex = np.exp(-np.abs(v) / VS)
     c = coeffs

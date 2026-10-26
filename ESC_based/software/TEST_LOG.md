@@ -19,6 +19,7 @@ firmware on both B-G431B-ESC1 boards. Newest entries at the bottom.
 | B7 | **PASS (levels 1–6)**: Kt = 64.6 mN·m/A at r ≈ 160 mm (−2 % vs nominal). The 4 cm rerun confirms the scaling (3×, rig wobble). Motor mount not rigid: clamp it before Phase C data |
 | C1 | **Gate A PASS (offline)**: free 10.3 mA (gentle motion), static ≤ 2.8 %, sign settled, rigid ≥ 6 N/mm vs foam ≈ 0.3 N/mm |
 | C2 | **PASS (live, 3D-printed arm, fitted model)**: free floor 19.1 mA (contact excluded; brief's 15 mA not met), static ≤ 5.0 %, loop p95 2.09 ms |
+| C3 | K_F ramp to 1.0 and KB_DAMP 2e-5 → 0.5e-5: all stable. Free felt current 79.8 → 35.9 mA (target 34.7); contact about 27× damping. User: contact only "a bit better". Tap rise about 36 ms |
 
 **Blocker for closed-loop work:** host stalls of up to 2 s.
 
@@ -2741,6 +2742,167 @@ interface, with all of: `TELEOP_FELT_SOURCE=tau_env`, `TELEOP_K_F=0.25`,
 
 **Status of the SD-stall issue:** fixed in code, behind
 `TELEOP_LOG_DIR`. Confirm in the live C3 runs (max loop_dt).
+
+---
+
+## 2026-10-25: C3 step 1, felt force = 0.25 · tau_env (dead band 20 mA)
+
+**Run:** `TELEOP_FRAME_QUEUE=1 TELEOP_SHADOW_TAU_ENV=1
+TELEOP_FOLLOWER_MODEL=follower_model_arm3d.json TELEOP_FELT_SOURCE=tau_env
+TELEOP_K_F=0.25 TELEOP_FELT_DEADBAND_A=0.02 TELEOP_LOG_DIR=/dev/shm/teleop_c3
+timeout -s INT 55 taskset -c 2,3 python3 teleop_test.py`. The user did
+free motion, then presses, then taps.
+
+- **Logs:** `logs/C3_kf025.csv` + `_frames` + `.png` (moved from RAM by
+  the new code).
+- 0 missing frames; loop p95 2.09 ms, max 46.9 ms. No watchdog trip.
+
+**User report:** *"no change in resistance between free spinning, the
+taps, and pushing."*
+
+**Measured (iq_b_cmd split into its terms):**
+
+| | Free (≥ 0.3 s from contact) | Contact |
+|---|---|---|
+| Felt contact term 0.25·deadband(tau_env) | **3.8 mA rms** | up to **137 mA** |
+| Leader damping −KB_DAMP·v_b (KB_DAMP = 2e-5) | **79.7 mA rms** | up to about 400 mA (iq_b_cmd max 424 mA) |
+| Total iq_b_cmd | 80.6 mA rms | — |
+
+- Leader stiction is about 60 mA breakaway (spin test) on top of that.
+- **Interpretation:** the new path removed the follower's own
+  inertia/friction from the felt force (3.8 mA in free motion). But at
+  K_F = 0.25 the contact term (≤ 137 mA ≈ 9 mN·m) is the same order as
+  the leader's damping and stiction, which are present everywhere. So
+  contact is masked, consistent with the user's report.
+
+**C3 criteria at this step:**
+
+| Criterion | Result | Verdict |
+|---|---|---|
+| Free felt current ≤ 30 % of A1 (≤ 34.7 mA) | 80.6 mA (79.7 of it leader damping) | **FAIL** |
+| Ringing: largest 5–40 Hz PSD bin vs 0.3–3 Hz mean | −15.5 dB (at 5.4 Hz) | PASS (≤ +10 dB) |
+| Watchdog trips | none | PASS |
+| Tap rise ≤ 30 ms | not evaluated yet | — |
+
+**Next:** step 2 at K_F = 0.5 (one gain at a time), then 1.0. If contact
+is still masked, reduce KB_DAMP as its own step and watch for ringing.
+
+---
+
+## 2026-10-25: C3 step 2, K_F = 0.5 (dead band 20 mA)
+
+**Run:** same as step 1 with `TELEOP_K_F=0.5`.
+
+- **Logs:** `logs/C3_kf050.csv` + `_frames` + `.png`.
+- 0 missing frames; loop p95 2.08 ms, max 50.2 ms. No watchdog trip.
+
+| | Free | Contact |
+|---|---|---|
+| Felt contact term 0.5·deadband(tau_env) | 7.4 mA rms | **145 mA rms, max 279 mA** |
+| Leader damping −KB_DAMP·v_b | 104.7 mA rms | 69 mA rms |
+| Total iq_b_cmd (free) | 107.1 mA rms | — |
+
+- Contact was 30 % of the time and clearly free only 8 %, so the free
+  numbers rest on little data.
+- **Ringing:** largest 5–40 Hz PSD bin −18.5 dB vs 0.3–3 Hz (at 5.1 Hz),
+  so **PASS**.
+- In contact, the felt term is now about 2× the leader damping (it was
+  about 1× at K_F = 0.25).
+- **User feel report:** "I did not feel contact."
+
+---
+
+## 2026-10-25: C3 step 3, K_F = 1.0 (dead band 20 mA)
+
+**Run:** same as steps 1–2 with `TELEOP_K_F=1.0`. Step 2's user report
+was recorded first: "I did not feel contact."
+
+- **Logs:** `logs/C3_kf100.csv` + `_frames` + `.png`.
+- 0 missing frames; loop p95 2.09 ms, max 56.8 ms. No watchdog trip.
+
+| | Free | Contact |
+|---|---|---|
+| Felt contact term 1.0·deadband(tau_env) | 13.8 mA rms | **531 mA rms**, max 1,482 mA (iq_b_cmd clamped at 1.0 A) |
+| Leader damping | 75.8 mA rms | 67 mA rms |
+| Total iq_b_cmd (free) | 79.8 mA rms | — |
+
+- Contact was 33 % of the time; clearly free 17 %.
+- The follower command also hit its 1.0 A clamp during presses.
+- **Contact with the leader nearly still** (|v_b| < 300, 4 % of the time):
+  felt term rms 547 mA. It does not fade at this gain.
+- **Ringing:** −17.6 dB (largest 5–40 Hz bin at 5.9 Hz), **PASS**.
+- In contact, the felt term is about 8× the leader damping, about
+  34 mN·m rms, up to the 1.0 A ceiling (about 65 mN·m).
+- **User feel report:** "the contact is a bit better."
+
+---
+
+## 2026-10-25: C3 tap-rise (K_F 1.0) and damping step 1 (KB_DAMP 1e-5)
+
+**Tap-rise on `C3_kf100`:** 38 contact onsets (after ≥ 40 ms quiet, peak
+> 150 mA). Felt 10–90 % rise median **35.9 ms** (2–190 ms); peaks median
+640 mA, spread 39 %. Target ≤ 30 ms, so a **marginal FAIL**. The onsets
+include slow presses as well as taps; a taps-only run is needed. The old
+path's A1 tap rise was 66 ms.
+
+**Code:**
+
+- `TELEOP_KB_DAMP` env override for the leader damping (default 2e-5
+  unchanged; teleop prints the value used).
+- `fit_follower_model.model_terms()` gets a plain-math scalar fast path
+  (4.2 µs/call). It is identical to the array path at test points
+  (0.00 nA difference).
+  - **Why:** loop p95 crept to 2.11 ms with numpy-on-scalars every frame.
+
+**Run:** `TELEOP_K_F=1.0 TELEOP_KB_DAMP=1e-5` (other flags as in C3
+steps 1–3).
+
+- **Logs:** `logs/C3_kf100_kb1e-5.csv` + `_frames` + `.png`.
+- 0 missing frames. **Loop p95 2.11 ms (marginal FAIL)**, max 61.5 ms,
+  before the fast path above.
+
+| | Free | Contact |
+|---|---|---|
+| Felt term | 8.6 mA rms | **523 mA rms** |
+| Leader damping | 60.9 mA rms (\|v_b\| rms 6,086: faster motion than before) | **35 mA** (was 67 at 2e-5) |
+| Total iq_b_cmd (free) | 62.1 mA rms (was 79.8) | — |
+
+- **Ringing:** −18.8 dB (5.6 Hz), **PASS**.
+- Rise median 85 ms over 36 onsets. Not comparable: it depends on how
+  contact was made.
+- **User feel report:** "it was lighter, the contact was about the same."
+
+---
+
+## 2026-10-25: C3 damping step 2 (KB_DAMP 0.5e-5), K_F 1.0
+
+**Run:** `TELEOP_K_F=1.0 TELEOP_KB_DAMP=0.5e-5`, other flags as before.
+The `model_terms` scalar fast path is in.
+
+- **Logs:** `logs/C3_kf100_kb5e-6.csv` + `_frames` + `.png`.
+- 0 missing frames. **Loop p95 2.08 ms (PASS), max 27.5 ms**, against
+  61 ms before the fast path.
+
+| | Free | Contact |
+|---|---|---|
+| Felt term | 12.5 mA rms | **508 mA rms** |
+| Leader damping | 32.6 mA rms (\|v_b\| rms 6,510) | **19 mA**, so contact about 27× damping |
+| **Total iq_b_cmd (free)** | **35.9 mA rms** vs target ≤ 34.7 mA: just above | — |
+
+- Contact 41 %, free only 7 %, so the free figure rests on little data.
+- **Ringing:** −17.9 dB (5.9 Hz), **PASS**.
+
+**C3 progression of the free felt current:**
+
+| KB_DAMP | Free felt current |
+|---|---|
+| 2e-5 | 79.8 mA |
+| 1e-5 | 62.1 mA |
+| 0.5e-5 | **35.9 mA** |
+
+Stable at every step.
+
+- **User feel report:** (pending)
 
 ---
 

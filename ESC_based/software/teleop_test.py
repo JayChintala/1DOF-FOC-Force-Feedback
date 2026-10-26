@@ -312,7 +312,10 @@ IQ_FILTER_ALPHA = 0.034  # EMA low-pass on Motor A's IQ_READBACK before mirrorin
 # but substantial at the oscillation's observed amplitude (tens of
 # thousands of counts/s) -- tune this first if oscillation persists or if
 # it now feels like B is dragging during a normal push.
-KB_DAMP = 0.00002       # A/(count/s) of Motor B's own filtered velocity
+KB_DAMP = float(os.environ.get("TELEOP_KB_DAMP", "0.00002"))  # A/(count/s) of Motor B's own filtered velocity
+# (C3, 2026-10-25: env override TELEOP_KB_DAMP so the leader damping can be
+# stepped down with the tau_env felt path, which no longer echoes the
+# follower's inertia; default unchanged.)
 
 
 # ---- Hand-torque observer: the force channel that is NOT loop gain ----
