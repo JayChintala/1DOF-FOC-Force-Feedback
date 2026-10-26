@@ -16,7 +16,8 @@ firmware on both B-G431B-ESC1 boards. Newest entries at the bottom.
 | B4 | PASS (flashed 2026-10-25; noise 9.7× lower; aliased peak reduced, not gone) |
 | B5 | dropped by the user |
 | B6 | FAIL (offline) |
-| B7 | script ready, needs a bench session |
+| B7 | **PASS (levels 1–6)**: Kt = 64.6 mN·m/A at r ≈ 160 mm (−2 % vs nominal). The 4 cm rerun confirms the scaling (3×, rig wobble). Motor mount not rigid: clamp it before Phase C data |
+| C1 | **Gate A PASS (offline)**: free 10.3 mA (gentle motion), static ≤ 2.8 %, sign settled, rigid ≥ 6 N/mm vs foam ≈ 0.3 N/mm |
 
 **Blocker for closed-loop work:** host stalls of up to 2 s.
 
@@ -2077,6 +2078,316 @@ criterion is only partly met: the peak is 8× smaller but still visible.
 
 ---
 
+## 2026-10-25: B7 attempt 1, aborted: both ESCs would not START (latched fault)
+
+**What happened:**
+
+1. The user set up the scale.
+2. `b7_force_cal.py --sign 1` printed its schedule, then **"ABORT: no
+   RUN"**: the follower never reported RUN within 5 s of START. No
+   current was applied.
+3. Passive check afterwards: both nodes streaming at 1 kHz, calibrated
+   (idle Iq A −0.106 A, B −0.012 A, so no MCU reset). DBG status 128 =
+   trip 4 (HOST_TIMEOUT, latched from the end of the previous run),
+   `run` False.
+4. `zero_iq_check.py` (user OK): **"RUN bit never seen" on both A and
+   B.** An hour earlier, in this session, both reached RUN (the B4
+   checks).
+
+**Cause (inferred from code):**
+
+- The CAN START handler only calls `MC_StartMotor1()`
+  (`can_driver.c:361-363`).
+- After any motor-control fault (under-voltage, over-voltage,
+  over-current), MCSDK latches FAULT_OVER and ignores START until
+  `MC_AcknowledgeFaultMotor1()` is called. Nothing in this firmware calls
+  it, and DBG does not report the fault code.
+- Both boards affected at once points to the shared motor supply:
+  most likely a VBUS dip below `UD_VOLTAGE_THRESHOLD_V` = 8 V while the
+  bench was rearranged for the scale. The user confirmed the supply is on
+  and that cables moved.
+- The 20 ms host timeout (trip 4) does not block START.
+
+**Fix now:** restore a steady supply, then power-cycle both ESCs (clears
+the latch). Then `bus_check.py` → `zero_iq_check.py` (re-align) → B7
+again.
+
+**Firmware improvement for later** (dev machine; added to the open
+issues, not done):
+
+- Acknowledge faults on START: call `MC_AcknowledgeFaultMotor1()` before
+  `MC_StartMotor1()`.
+- Put the MCSDK fault code (`MC_GetOccurredFaultsMotor1()`) into DBG, so
+  a latched fault is diagnosable over CAN instead of looking like a
+  silent "no RUN".
+- It may also explain some earlier "simultaneous ESC" events (inferred).
+
+---
+
+## 2026-10-25: B7 attempt 2 aborted: both ESCs rebooted again (no motor activity)
+
+**What happened:**
+
+1. After the user power-cycled the ESCs: `bus_check.py` showed RESET on
+   both, as expected, with status 0.
+2. The user lifted the link; `zero_iq_check.py` re-aligned both. PASS.
+   RUN noise A 4.2 mA, B 3.3 mA. ESC1's counter load was 219 → 142, a
+   77-count jump, below the check's 100-count report threshold. Log:
+   `logs/precheck_zero_iq_realign_B7.csv`.
+3. The user put the link back on the scale and re-tared.
+   `b7_force_cal.py` then aborted at its pre-check, **"node missing or
+   reset"**. No current was applied.
+4. `bus_check.py`: **both** ESCs uncalibrated again (idle Iq A +22.5 A,
+   B +28.6 A), encoder counters restarted near 0. **Both MCUs rebooted
+   within about 2 minutes, with nothing commanded.** The Pi was
+   unaffected: `throttled=0x0`, CAN error-active.
+
+**Shared-power events so far:**
+
+| Date | Event | Motor activity |
+|---|---|---|
+| 2026-10-20 | between P2 and A1 run 1: both reset | none |
+| 2026-10-20 | A1 run 2, attempt 2: both reset in the same ms | about 0.2 A |
+| 2026-10-25 | after scale setup: both latched a fault (likely a VBUS dip) | none |
+| 2026-10-25 | during link placement and re-tare: both reset | none |
+
+**Interpretation (inferred, strong):** a fault in what the two boards
+share, i.e. the motor supply, its leads or a connector. Not the firmware
+or the Pi. The last two events coincided with the user handling the
+setup, which suggests an intermittent connection.
+
+**Action:** stop motor tests until it is found. Proposed:
+
+- A receive-only reset monitor (1 ms resolution) while the user wiggles
+  each connector.
+- Check the supply's voltage, current limit and CV/CC state.
+
+---
+
+## 2026-10-25: B7, static force calibration — data taken; FAIL as specified (geometry question open)
+
+**What ran:**
+
+1. After the user reseated connections (both ESCs rebooted, so
+   re-aligned with the link lifted, PASS), the link was placed on the
+   kitchen scale on a rigid support and tared at 0 A.
+2. `b7_force_cal.py --sign 1`: all 7 levels completed. Shaft travel was
+   **0 counts** in the second half of every hold, so the link pressed
+   rigidly. `throttled=0x0`.
+
+**Log:** `logs/B7_cal.csv`. The earlier aborted attempts are
+`B7_cal_attempt1_noRUN.csv` and `B7_cal_attempt2_reset.csv`.
+
+| Level | iq_cmd | iq_meas mean (std) | Scale (user) | Force | g per A |
+|---|---|---|---|---|---|
+| 1 | 0.05 A | 0.0496 (8.6 mA) | 3 g | 0.0294 N | 60.5 |
+| 2 | 0.10 | 0.0991 (8.6) | 6 | 0.0589 | 60.5 |
+| 3 | 0.20 | 0.1981 (8.6) | 9 | 0.0883 | 45.4 |
+| 4 | 0.30 | 0.2986 (9.7) | 13 | 0.1275 | 43.5 |
+| 5 | 0.45 | 0.4464 (12.1) | 19 | 0.1864 | 42.6 |
+| 6 | 0.60 | 0.5911 (34.7) | 26 | 0.2551 | 44.0 |
+| 7 | 0.80 | **0.6754 (82.0)** | 40 | 0.3924 | 59.2 |
+
+**Fits** (F vs mean measured |Iq|):
+
+| Levels | Slope | Intercept | R² |
+|---|---|---|---|
+| All 7 | 0.508 N/A | −0.0087 N | 0.934 |
+| 1–6 | **0.404 N/A** | +0.0111 N | **0.996** |
+| 1–5 | 0.384 N/A | +0.0143 N | 0.996 |
+| Through origin, all 7 | 0.490 N/A | — | — |
+
+**Verdict: FAIL as specified** (all 7: R² 0.934 < 0.99; slope −85 % vs
+3.3 N/A). But:
+
+- **Levels 1–6 are linear (R² 0.996).** Level 7 is the outlier, and its
+  current measurement is unreliable: it fell short of the command
+  (0.675 vs 0.80 A) with 10× normal noise. That suggests the current
+  loop is out of headroom near 0.8 A at stall, for example a supply
+  current limit, or the firmware limit the user mentioned (inferred).
+- **The slope's expected value depends on geometry.** The brief's
+  3.3 N/A assumes the force acts 2 cm from the shaft (66 mN·m/A ÷
+  0.02 m). F = τ/r, so 0.40 N/A matches the nominal Kt if the contact
+  point is about 16 cm from the shaft axis: 0.40 × 0.16 = 64 mN·m/A
+  (inferred). **The user has been asked for the contact radius.**
+- **Low levels read high** (60 g/A vs about 43 at levels 3–6): 1 g scale
+  resolution (±17 % at 3 g), and bearing stiction (0.05–0.09 A
+  breakaway) can carry part of a static load.
+
+**Next:** with the radius r, report Kt = slope × r (mN·m/A), and rescale
+the brief's force numbers to the real geometry: N/A = Kt / r, and
+mm/count = 2π·r / 4000 (the brief's 0.031 mm/count assumes r = 2 cm).
+Consider repeating with more mid-range levels and a finer scale if
+better accuracy is needed for D1.
+
+---
+
+## 2026-10-25: B7 re-evaluated with the real contact radius (r ≈ 160 mm, user)
+
+**Torque constant:** Kt = slope × r.
+
+| Fit | Slope | Kt (r = 0.160 m) | vs nominal 66 mN·m/A |
+|---|---|---|---|
+| Levels 1–6 | 0.404 N/A | **64.6 mN·m/A** | −2 % |
+| Levels 1–5 | 0.384 N/A | 61.4 mN·m/A | −7 % |
+| All 7 | 0.508 N/A | 81 mN·m/A | +23 % (level 7 distorted) |
+
+- The user's radius is "roughly 160 mm". ±1 cm on r is ±6 % on Kt.
+
+**Verdict: B7 PASS on levels 1–6.**
+
+- R² 0.996 (≥ 0.99).
+- Slope within 2 % of the geometry-correct expectation, 66/0.160 =
+  0.41 N/A (≤ 15 %).
+- **Level 7 is excluded explicitly:** the current loop did not reach the
+  0.80 A command (measured 0.675 A, std 82 mA).
+- With all 7 levels it is a FAIL (R² 0.934). The brief's 3.3 N/A assumed
+  a 2 cm link and does not apply to this rig.
+
+**Geometry conversion for later phases.** The brief's numbers assume
+r = 2 cm; this rig contacts at about 160 mm.
+
+| Quantity | Brief (r = 2 cm) | This rig (r ≈ 160 mm) |
+|---|---|---|
+| Force per amp at the contact point | 3.3 N/A | **0.40 N/A** (measured 0.404) |
+| Tip displacement per count | 0.031 mm | **0.25 mm** (2π·160/4000) |
+| Force at a 0.6 A ceiling (level 7 shows current falling short near 0.8 A) | about 2 N | **about 0.24 N (about 25 g)** |
+| Free-motion estimate floor (feasibility, 34 mA) | about 0.11 N | about 14 mN (2.2 mN·m) |
+| B4 sensor noise (3 mA) | — | about 1.2 mN (0.2 mN·m) |
+
+- **Proposal:** restate the Phase D force thresholds as **torque**, so
+  they do not depend on where the follower is pressed.
+  - D1's 0.05 N floor at 2 cm is 1.0 mN·m.
+  - D1's "0.2 N up to the ceiling" becomes about 4 mN·m to the ceiling
+    (about 40 mN·m at 0.6 A).
+  - D2's stiffness uses 0.25 mm/count at the tip, or rad/count at the
+    shaft.
+- **Not changed in the plan text yet:** this needs the user's agreement.
+
+---
+
+## 2026-10-25: B7 rerun at a shorter lever arm (about 4 cm)
+
+**Why:** at r ≈ 160 mm the tip force was only about 0.24 N at 0.6 A. The
+user shortened the lever arm to about 4 cm (not measured precisely).
+
+**What ran:** the same `b7_force_cal.py --sign 1`. Levels 1–5 completed;
+it **aborted at level 6** on the travel check (+101 counts within the
+level, about 6 mm of arc at 4 cm). Travel was already 20 counts at
+level 5 and 53 at level 6. The user reports the measurement rig wobbled:
+the lever arm moved the motor, so the motor mount is not rigid.
+`throttled=0x0`.
+
+**Log:** `logs/B7_cal_r40mm.csv`. The earlier run is now
+`logs/B7_cal_r160mm.csv`.
+
+| Level | iq_meas mean (std) | Scale (user, "scuffed") |
+|---|---|---|
+| 1 | 0.0495 A (8.1 mA) | 3 g |
+| 2 | 0.0991 (8.0) | 10 |
+| 3 | 0.1980 (8.6) | 22 |
+| 4 | 0.2982 (10.0) | 34 |
+| 5 | 0.4401 (25.0), 20 counts travel | 60 |
+
+**Fits:**
+
+| Levels | Slope | Intercept | R² |
+|---|---|---|---|
+| 1–4 | **1.214 N/A** | −0.027 N | 0.999 |
+| 1–5 | 1.397 N/A | −0.050 N | 0.990 |
+
+- Expected at exactly 40 mm: 66/0.040 = 1.65 N/A. Measured 1–4 is
+  **3.0×** the 160 mm run; geometry predicts 4.0×.
+- **Likely causes (inferred):** motor-mount compliance absorbing part of
+  the push (the user saw the motor move), the scale readings being
+  uncertain, and/or a true contact radius above 4 cm (1.214 N/A would
+  imply about 54 mm at 66 mN·m/A).
+
+**Verdict:** confirms the scaling (much stronger at a short arm). The
+**calibration value stays Kt = 64.6 mN·m/A** from the 160 mm run (rigid
+contact, 0 travel). The user moved on to the next phase.
+
+**Important for Phase C/D:** the **motor mount moves under load.** A
+compliant mount makes a rigid contact look soft, which is exactly the
+rigid-vs-soft distinction D2/D4 must measure. **Clamp the motor mount
+rigidly before the contact-data session.**
+
+---
+
+## 2026-10-25: Phase C data session + C1 offline evaluation
+
+**Data session.** First post-B4 contact data, recorded with:
+
+- the motor mount clamped (user);
+- the follower arm hovering above a rigid surface at about 4 cm
+  contact radius, unable to rotate 360°;
+- every-frame logging **to RAM**: teleop run from `/dev/shm/c1data/<run>`
+  and copied back. That is the SD-stall workaround.
+
+Boards were still aligned from earlier. Each run was
+`TELEOP_FRAME_QUEUE=1 timeout -s INT 50..70 taskset -c 2,3 python3 teleop_test.py`,
+with the user on the leader and the felt path unchanged.
+
+| Run | Log | Frames / missing | max loop_dt | Notes |
+|---|---|---|---|---|
+| Free motion | `logs/C1_free.csv` + `_frames` | 67.6 s / 0 | 15.1 ms | follower range only 278 counts (25°), leader \|v\| rms 252, so **gentle** |
+| Rigid presses | `logs/C1_rigid_press.csv` + `_frames` | 0 missing | 17.0 ms | idle for the first 34 s; 6 holds of about 1 s at 0.18–0.62 A |
+| Rigid taps | `logs/C1_rigid_taps.csv` + `_frames` | 0 missing | 12.9 ms | about 29 contacts, median impact about 6,900 counts/s |
+| Foam (1 piece) | `logs/C1_foam1.csv` + `_frames` | 0 missing | 12.8 ms | contact 92 % of the time |
+
+**C1 estimator** (`c1_eval.py`): `ExternalTorqueObserver` (20 Hz, G_A =
+9.025e6) on every frame, with AB 55 Hz velocity and mcu dt.
+
+- **Alignment:** the current is delayed 3 frames (3 ms) to match the
+  velocity lag. On this gentle data it made no measurable difference.
+- **Friction model:** fitted on the free run. Degenerate on this gentle
+  motion (cancelling ±0.2 A terms); not trusted.
+- **Units:** Kt = 64.6 mN·m/A (B7), r = 0.04 m.
+
+| Check | Result | Threshold | Verdict |
+|---|---|---|---|
+| 1. Free-space rms (C1_free) | **10.3 mA** = 0.67 mN·m ≈ 17 mN at 4 cm (p99 46 mA) | brief < 15 mA; Gate A ≤ 25 mA | **PASS**, but on gentle motion: mostly the at-rest floor |
+| 2. Static accuracy, 6 rigid holds (0.26–1.03 N) | estimate vs measured current **+2.8, +1.4, +1.2, +1.5, +1.6, −0.2 %** | within 10 % of B7 | **PASS** |
+| 3. Sign | holds: current +, estimate + → environment pushes −; **tau_env (brief convention) = −(i − a/G)** | — | settled |
+| 4. Rigid vs foam | see below | D2: rigid ≥ 5× stiffest foam | **≈ 18× or more** (preview) |
+
+**Check 4: quasi-static frames only** (|v| < 300 counts/s, estimate
+> 0.08 A): median raw position per 0.1 N force bin.
+
+- **Rigid presses:** 0.45–1.15 N → 3175…3177 (2 counts over 0.7 N), so
+  **≥ about 6 N/mm**, encoder-limited (0.063 mm/count at 4 cm).
+  - The 0.25–0.35 N bins sit at 3203: an earlier press 28 counts higher,
+    consistent with the mount shifting under load (inferred).
+  - The 0.15 N bin (2830) is a slow free-space push, not contact, and is
+    excluded. Including it gave a meaningless 0.11 N/mm.
+- **Rigid taps:** ≥ 0.45 N → 3172…3176, so ≥ about 5 N/mm.
+- **Foam:** 0.15 → 1.15 N gives 2818 → 2876 (58 counts), **about
+  0.3 N/mm** (3.4 mm/N).
+
+**Gate A: PASS.**
+
+- Free floor 10.3 mA ≤ 25 mA.
+- Static error 2.8 % ≤ 10 %.
+- Contact forces of 0.26–1.03 N are 15–60× the 17 mN floor.
+
+**Caveats (to close in C2 or with a short extra run):**
+
+1. The free run was gentle. The inertia and friction path is barely
+   exercised, so a more dynamic free run within the allowed range is
+   needed to confirm the floor.
+2. The friction model is ill-posed on this data.
+3. Ripple compensation is not applied (B6 refit on post-B4 constant-speed
+   data is still to do).
+4. Only one foam. The radius is about 4 cm, not measured precisely.
+5. The motor-mount shift (28 counts) would distort D2. Re-clamp before
+   Phase D.
+
+**Next:** C2, shadow mode. Compute and log tau_env live in teleop
+(flagged), with the felt path unchanged. Then C3 needs the SD fix in
+code, not the cwd workaround, before closing the loop.
+
+---
+
 ## Phase A summary (2026-10-20)
 
 | Step | Result | Key number |
@@ -2580,6 +2891,12 @@ path), as in the brief.
    as hand torque).
 4. **G vs frequency.** See A4b.
 5. **Angle-dependent Iq noise ×1.3–2.** See A3b. B4 may reduce it.
+7. **Latched motor-control faults are invisible over CAN** (2026-10-25).
+   - START is ignored after any fault until it is acknowledged, and
+     nothing acknowledges it. The DBG frame has no fault code.
+   - Proposed (dev machine): acknowledge on START, and report the fault
+     code in DBG.
+   - Workaround: power-cycle the ESCs.
 6. **The FF echo.** By construction, tau_h ≈ −LPF(i_b) while the leader
    is held. C3 replaces the felt source; watch the hand-closed loop gain.
 
