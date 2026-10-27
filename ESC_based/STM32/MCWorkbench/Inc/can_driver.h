@@ -83,7 +83,9 @@
  * TELEM payload, 8 bytes, little-endian -- everything the Pi reads, in one
  * frame per 1 kHz tick. The PEER ESC reads it too: bytes 4..7 are what
  * its coupling law runs on.
- *   [0..3] float32  Iq, Amps (MC_GetIqdMotor1_F().q -- raw, unfiltered)
+ *   [0..3] float32  Iq, Amps: 1 ms mean of the 16 kHz samples when
+ *                   TELEM_IQ_MEAN (default, can_driver.c); raw single
+ *                   sample MC_GetIqdMotor1_F().q when TELEM_IQ_MEAN is 0
  *   [4..5] uint16   raw TIM4 encoder count, 0..3999 (wraps at M1_PULSE_NBR)
  *   [6..7] uint16   MCU timestamp, microseconds, free-running, wraps at 65536
  *

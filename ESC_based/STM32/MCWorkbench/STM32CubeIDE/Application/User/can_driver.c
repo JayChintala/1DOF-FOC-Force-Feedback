@@ -16,6 +16,13 @@
                               if the Iq sent below is switched to the
                               IqTelem EWMA -- see SendTelemetry() */
 
+/* B4: TELEM Iq = mean of every 16 kHz sample since the previous TELEM
+   (IqTelem_GetMeanAndReset, raw s16A, scaled to Amps). 0 = the old raw
+   single sample MC_GetIqdMotor1_F().q. */
+#ifndef TELEM_IQ_MEAN
+#define TELEM_IQ_MEAN 1
+#endif
+
 #if CAN_PEER_NODE_ID == CAN_NODE_ID
 #error "CAN_PEER_NODE_ID must differ from CAN_NODE_ID"
 #endif
@@ -410,24 +417,25 @@ static void SendTelemetry(const CAN_TickSample_t* s) {
   FDCAN_TxHeaderTypeDef hdr;
   FillTxHeader(&hdr, CAN_ID_TELEM(CAN_NODE_BASE));
 
-  qd_f_t iqd = MC_GetIqdMotor1_F(); /* .q = torque-producing current, .d = 0 in
-                                       your control scheme */
-
   /* uint16: TIM4's ARR is M1_PULSE_NBR (= 4*PPR - 1 = 3999), so the counter
      spans 0..3999. Sampled at the top of the tick (SampleTick()), the same
      instant the coupling law used. */
   uint16_t const encCount = s->enc;
   uint16_t const tstamp_us = (uint16_t)s->us;
 
-  /* The 16 kHz conditioned-Iq accumulator (IqTelem_UpdateHF) is still
-     running and must still be drained exactly once per telemetry period --
-     GetMeanAndReset clears it, and left uncalled the sum grows without bound
-     and loses float precision. Its result is not transmitted. The
-     accumulator is kept because IqTelem_GetEwma() is the obvious fix if raw
-     Iq proves too noisy to teleoperate on -- swapping iqd.q below for
-     IqTelem_GetEwma() * scaleParams_M1.current is then a one-line change on
-     this side and none at all on the Pi's. */
+  /* The 16 kHz accumulator (IqTelem_UpdateHF) must be drained exactly once
+     per telemetry period -- GetMeanAndReset clears it; left uncalled the
+     sum grows without bound and loses float precision. With
+     TELEM_IQ_MEAN its mean is what TELEM sends (B4): a 16-tap boxcar has
+     nulls at 1, 2, 3 ... kHz, exactly where the 1 kHz decimation of the
+     raw sample aliased from. It returns the EWMA if no samples accrued
+     (HF task not running), so the field never reads as a bogus zero. */
+#if TELEM_IQ_MEAN
+  float const iq_tx = IqTelem_GetMeanAndReset() * scaleParams_M1.current;
+#else
   (void)IqTelem_GetMeanAndReset();
+  float const iq_tx = MC_GetIqdMotor1_F().q; /* raw single sample */
+#endif
 
   /* SRAMCAN_TFQ_NBR is hardcoded to 3 in stm32g4xx_hal_fdcan.c, so a frame
    * offered while three are still queued is dropped outright rather than
@@ -437,7 +445,7 @@ static void SendTelemetry(const CAN_TickSample_t* s) {
    * Layout must stay in lockstep with the TELEM comment in can_driver.h
    * and _handle_message() in can_interface.py. */
   uint8_t payload[8];
-  memcpy(&payload[0], &iqd.q, sizeof(float));
+  memcpy(&payload[0], &iq_tx, sizeof(float));
   memcpy(&payload[4], &encCount, sizeof(uint16_t));
   memcpy(&payload[6], &tstamp_us, sizeof(uint16_t));
 

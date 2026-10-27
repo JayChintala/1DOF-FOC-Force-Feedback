@@ -110,7 +110,7 @@
  * SET_IQ and then sleep (spin_motor2.py, sign_check_test.py) must re-send
  * it at least this often against this firmware. 0 disables. */
 #ifndef COUPLE_DIRECT_TIMEOUT_US
-#define COUPLE_DIRECT_TIMEOUT_US 200000u
+#define COUPLE_DIRECT_TIMEOUT_US 20000u /* was 200000u; see FIRMWARE_CHANGES.txt */
 #endif
 
 /* ---- DBG status byte ---- */
