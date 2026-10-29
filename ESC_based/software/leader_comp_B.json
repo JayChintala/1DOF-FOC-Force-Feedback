@@ -1,0 +1,19 @@
+{
+ "harmonics_A": {
+  "28": [
+   -0.0031383924993480805,
+   -0.009569618149116775
+  ],
+  "84": [
+   -0.0006680375148617619,
+   -0.004302097687151104
+  ]
+ },
+ "coulomb_A": 0.01718908100684376,
+ "v0_cnt_s": 300.0,
+ "sources": [
+  "logs/friction_map_B_2.csv:1257",
+  "logs/friction_map_B_3.csv:1279"
+ ],
+ "note": "amps to overcome the disturbance; count = leader raw encoder count"
+}

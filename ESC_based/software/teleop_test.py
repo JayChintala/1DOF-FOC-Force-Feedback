@@ -132,6 +132,9 @@ import collections
 import json
 import shutil
 
+from contact_spring import ContactSpring
+from leader_comp import LeaderComp
+import leader_cal
 from estimators import AlphaBetaVelocity, ExternalTorqueObserver, HandTorqueObserver
 from fit_follower_model import model_terms
 from plot_run import plot_teleop_log
@@ -179,8 +182,12 @@ KV_SLOPE = 0.00003       # A/(count/s), initial P-term slope near verr=0.
                          # 66% of the limit, leaving margin for the +-4.4%
                          # uncertainty in G. This term's remaining job is
                          # velocity tracking and damping, not force.
-IQ1_MAX_A = 1.0          # hard clamp/asymptote on Motor A's commanded
+IQ1_MAX_A = float(os.environ.get("TELEOP_IQ1_MAX_A", "1.0"))
+                         # hard clamp/asymptote on Motor A's commanded
                          # current -- the "door's" max resistance.
+                         # 2026-10-26: 0.8 A is the motor's thermal rating
+                         # (user); with the contact spring, holds sit at the
+                         # clamp, so run TELEOP_IQ1_MAX_A=0.8.
                          # RESOLVED: the old note here guessed that
                          # oscillation, via the output filter, was what
                          # capped peak commands near 0.6 A. The filter half
@@ -446,7 +453,7 @@ OBS_G_SOURCE = os.environ.get("TELEOP_OBS_G", "old")
 OBS_DT_SOURCE = os.environ.get("TELEOP_OBS_DT", "nominal")
 G_B_A2_CNT_S2_PER_A = 9_672_000
 # C2: shadow follower external-torque estimate, computed live and logged
-# only (column tau_env, plus tau_env_N at SHADOW_R_CONTACT_M) -- nothing
+# only (column tau_env, plus tau_env_N via SHADOW_N_PER_A) -- nothing
 # here feeds control or the felt path. Exactly the estimator validated
 # offline in c1_eval.py (2026-10-25): ExternalTorqueObserver at 20 Hz with
 # A2's G_A, fed every follower frame with its own AB 55 Hz velocity and the
@@ -458,7 +465,12 @@ SHADOW_TAU_ENV = os.environ.get("TELEOP_SHADOW_TAU_ENV", "0") == "1"
 G_A_A2_CNT_S2_PER_A = 9_025_000
 SHADOW_ALIGN_FRAMES = 3
 SHADOW_KT_NM_PER_A = 0.0646           # B7
-SHADOW_R_CONTACT_M = 0.0757           # contact radius used for tau_env_N
+SHADOW_R_CONTACT_M = 0.0757           # contact radius of the 3D-printed arm
+# tau_env_N uses the force factor MEASURED at the follower tip against the
+# scale (TEST_LOG 2026-10-28 static calibration: 1.044 N/A, R^2 0.995,
+# levels 0.1-0.45 A), 22 % above Kt/r = 0.853 N/A. Valid below ~0.5 A, where
+# the current measurement starts to break down.
+SHADOW_N_PER_A = 1.044
 # C2: optional fitted follower model (fit_follower_model.py): its G replaces
 # G_A_A2_CNT_S2_PER_A and its friction + gravity terms are subtracted from
 # the shadow estimate. Unset = the C1 estimator unchanged.
@@ -495,6 +507,36 @@ FELT_SOURCE = os.environ.get("TELEOP_FELT_SOURCE", "iq_a_filt")
 FELT_K_F = float(os.environ.get("TELEOP_K_F", "0.25"))
 FELT_DEADBAND_A = float(os.environ.get("TELEOP_FELT_DEADBAND_A", "0"))
 
+# Sustained-hold fix (TEST_LOG 2026-10-26): contact-latched spring added to
+# the follower command, see contact_spring.py. HOLD_K in A/count of
+# leader-past-contact-point; 0 = off (the C3 behaviour). HOLD_MAX_A bounds
+# the term (and so how fast a held force can wind up). Needs the tau_env
+# felt path. Overrides: TELEOP_HOLD_K=0.5e-3 TELEOP_HOLD_MAX_A=0.1
+HOLD_K = float(os.environ.get("TELEOP_HOLD_K", "0"))
+HOLD_MAX_A = float(os.environ.get("TELEOP_HOLD_MAX_A", "0.1"))
+HOLD_RAMP_S = float(os.environ.get("TELEOP_HOLD_RAMP_S", "0.3"))   # 0 = full strength at engage (HOLD runs 1-2)
+
+# Leader ripple + friction compensation (TEST_LOG 2026-10-26, leader_comp.py):
+# model file from friction_map.py sweeps; "" = off. Feed-forward d(th, v) on
+# iq_b_cmd, and (LEADER_COMP_OBS) i_b - d into the hand-torque observer.
+# Overrides: TELEOP_LEADER_COMP=leader_comp_B.json TELEOP_LEADER_COMP_RIPPLE=1.0
+#            TELEOP_LEADER_COMP_FRIC=0.5 TELEOP_LEADER_COMP_OBS=1
+LEADER_COMP_PATH = os.environ.get("TELEOP_LEADER_COMP", "")
+LEADER_COMP_RIPPLE = float(os.environ.get("TELEOP_LEADER_COMP_RIPPLE", "1.0"))
+LEADER_COMP_FRIC = float(os.environ.get("TELEOP_LEADER_COMP_FRIC", "0.5"))
+LEADER_COMP_OBS = os.environ.get("TELEOP_LEADER_COMP_OBS", "1") == "1"
+# In-session leader calibration (leader_cal.py): after START, a hands-off
+# ~30 s leader sweep (follower at 0 A) is fitted and used as the leader comp
+# for this session -- the 7/rev amplitude changes every START and the 12/rev
+# phase every power-up, so a fixed file cannot follow them. Supersedes
+# TELEOP_LEADER_COMP. Override: TELEOP_LEADER_CAL=1
+LEADER_CAL = os.environ.get("TELEOP_LEADER_CAL", "0") == "1"
+# Warm-up before the leader cal: hold both at 0 A in RUN this many seconds.
+# The leader's 7/rev grows in RUN (tau ~160 s, ~60-65 mA warm; TEST_LOG
+# 2026-10-28) and a START-time cal misses it; 300 s reaches ~85 %, 480 s
+# ~95 %. 0 = no warm-up. Override: TELEOP_LEADER_WARMUP_S=300
+LEADER_WARMUP_S = float(os.environ.get("TELEOP_LEADER_WARMUP_S", "0"))
+
 
 def clamp(value, lo, hi=None):
     if hi is None:
@@ -521,6 +563,20 @@ def main():
                          "TELEOP_FOLLOWER_MODEL (the C2-validated estimator)")
     if not 0.0 <= FELT_K_F <= 1.0:
         raise SystemExit("TELEOP_K_F must be in [0, 1] (C3 ramps 0.25 -> 0.5 -> 1.0)")
+    if HOLD_K and FELT_SOURCE != "tau_env":
+        raise SystemExit("TELEOP_HOLD_K needs TELEOP_FELT_SOURCE=tau_env (contact is detected from tau_env)")
+    if not (0.0 <= HOLD_K <= 2e-3 and 0.0 <= HOLD_MAX_A <= 0.3):
+        raise SystemExit("TELEOP_HOLD_K must be in [0, 2e-3] A/count and TELEOP_HOLD_MAX_A in [0, 0.3] A")
+    hold = ContactSpring(HOLD_K, HOLD_MAX_A, sign_=SIGN, ramp_s=HOLD_RAMP_S) if HOLD_K else None
+    if not (0.0 <= LEADER_COMP_RIPPLE <= 1.5 and 0.0 <= LEADER_COMP_FRIC <= 1.0):
+        raise SystemExit("TELEOP_LEADER_COMP_RIPPLE must be in [0, 1.5], TELEOP_LEADER_COMP_FRIC in [0, 1]")
+    lcomp = (LeaderComp.load(LEADER_COMP_PATH, gain_ripple=LEADER_COMP_RIPPLE, gain_fric=LEADER_COMP_FRIC)
+             if LEADER_COMP_PATH else None)
+    iq_b_comp = 0.0
+    if LEADER_CAL and not USE_FRAME_QUEUE:
+        raise SystemExit("TELEOP_LEADER_CAL=1 needs TELEOP_FRAME_QUEUE=1")
+    if LEADER_WARMUP_S and not LEADER_CAL:
+        raise SystemExit("TELEOP_LEADER_WARMUP_S only applies with TELEOP_LEADER_CAL=1")
 
     # pair_dbg=False releases each frame on arrival; pairing with the 10 Hz
     # direct-mode DBG would hold every record ~1 ms for nothing.
@@ -621,6 +677,8 @@ def main():
          # is the FF_GAIN sign problem and it will be obvious here.
          "tau_h", "iq_a_ff"]
         + (["tau_env", "tau_env_N"] if SHADOW_TAU_ENV else [])
+        + (["iq_a_hold", "hold_e0"] if hold else [])
+        + (["iq_b_comp"] if (lcomp or LEADER_CAL) else [])
     )
 
     stale_count = 0
@@ -640,6 +698,32 @@ def main():
         a.send_set_iq(0.0)
         b.send_set_iq(0.0)
         time.sleep(0.3)
+
+        if LEADER_CAL and LEADER_WARMUP_S > 0:
+            print(f"Warm-up: {LEADER_WARMUP_S:.0f} s in RUN at 0 A (hands off, follower limp)...")
+            t_w = time.monotonic()
+            next_note = t_w + 60.0
+            while time.monotonic() - t_w < LEADER_WARMUP_S:
+                a.send_set_iq(0.0)
+                b.send_set_iq(0.0)
+                a.drain_records()
+                b.drain_records()
+                if time.monotonic() >= next_note:
+                    print(f"  warm-up {time.monotonic() - t_w:.0f} / {LEADER_WARMUP_S:.0f} s")
+                    next_note += 60.0
+                time.sleep(0.005)
+        if LEADER_CAL:
+            print("Leader calibration: HANDS OFF the leader (~30 s sweep, 1 rev each way)...")
+            cal_rows = leader_cal.sweep(b, a, log_path=log_path[:-4] + "_cal.csv")
+            if cal_rows is None:
+                return
+            cal_model = leader_cal.fit(cal_rows)
+            with open(log_path[:-4] + "_cal.json", "w") as f:
+                json.dump(cal_model, f, indent=1)
+            print("Leader calibration: " + leader_cal.summary(cal_model))
+            lcomp = LeaderComp(cal_model, gain_ripple=LEADER_COMP_RIPPLE, gain_fric=LEADER_COMP_FRIC)
+            print("Leader comp from this calibration is ON. Take the leader.\n")
+            time.sleep(1.0)
 
         ta0 = a.get_telemetry()
         tb0 = b.get_telemetry()
@@ -661,6 +745,9 @@ def main():
               + (f" with model {FOLLOWER_MODEL_PATH} (G {shadow_g:,.0f})" if follower_model else "") + ")")
         print(f"Felt force: {FELT_SOURCE}" + (f", K_F {FELT_K_F:g}, dead band {FELT_DEADBAND_A * 1e3:g} mA"
                                               if FELT_SOURCE == "tau_env" else "")
+              + (f"; contact spring K {HOLD_K:g} A/count, max {HOLD_MAX_A:g} A, ramp {HOLD_RAMP_S:g} s" if hold else "")
+              + (f"; leader comp {'in-session cal' if LEADER_CAL else LEADER_COMP_PATH} (ripple x{LEADER_COMP_RIPPLE:g}, friction x{LEADER_COMP_FRIC:g}, "
+                 f"observer {'on' if LEADER_COMP_OBS else 'off'})" if lcomp else "")
               + (f"; logging live to {LIVE_LOG_DIR}, moved to {LOG_DIR}/ at exit" if LIVE_LOG_DIR else ""))
         print("Spin B; A should follow. Hold A; feel resistance in B. Ctrl+C to stop.\n")
 
@@ -808,6 +895,11 @@ def main():
                 iq_b_meas is None or iq_b_meas_time is None
                 or (now_wall - iq_b_meas_time) > STALE_TIMEOUT_S
             )
+            if lcomp is not None:
+                iq_b_comp = lcomp.d(pos_b, vel_b_filt)
+                if LEADER_COMP_OBS and not iq_b_stale:
+                    # the observer then sees hand torque, not ripple/friction
+                    iq_b_meas = iq_b_meas - iq_b_comp
             if not iq_b_stale and hand_obs is not None:
                 # B3 class path. dt from the ESC clock or nominal, per config.
                 if OBS_DT_SOURCE == "nominal":
@@ -838,7 +930,8 @@ def main():
             iq_a_p = IQ1_MAX_A * math.tanh(SIGN * KV_SLOPE * verr / IQ1_MAX_A)
             iq_a_d = SIGN * KD_SLOPE * accel_err_filt
             iq_a_ff = clamp(SIGN * FF_GAIN * tau_h_hat, FF_MAX_A)
-            iq_a_cmd_raw = clamp(iq_a_p + iq_a_d + iq_a_ff, IQ1_MAX_A)
+            iq_a_hold = hold.update(now, err, tau_env, vel_a_filt) if hold else 0.0
+            iq_a_cmd_raw = clamp(iq_a_p + iq_a_d + iq_a_ff + iq_a_hold, IQ1_MAX_A)
             iq_a_cmd_filt = (IQ_A_CMD_FILTER_ALPHA * iq_a_cmd_raw
                               + (1 - IQ_A_CMD_FILTER_ALPHA) * iq_a_cmd_filt)
             iq_a_cmd = iq_a_cmd_filt
@@ -857,7 +950,7 @@ def main():
                     x = tau_env
                     if FELT_DEADBAND_A > 0:
                         x = math.copysign(max(0.0, abs(x) - FELT_DEADBAND_A), x)
-                    iq_b_cmd = clamp(FELT_K_F * x - KB_DAMP * vel_b_filt, IQ2_MAX_A)
+                    iq_b_cmd = clamp(FELT_K_F * x - KB_DAMP * vel_b_filt + iq_b_comp, IQ2_MAX_A)
                 else:
                     iq_b_cmd = clamp(FEEDBACK_GAIN * iq_a_filt - KB_DAMP * vel_b_filt, IQ2_MAX_A)
             b.send_set_iq(iq_b_cmd)
@@ -896,8 +989,10 @@ def main():
                  fresh_a, fresh_b, f"{elapsed:.5f}",
                  f"{tau_h_hat:.4f}", f"{iq_a_ff:.4f}"]
                 + ([f"{tau_env:.4f}",
-                    f"{tau_env * SHADOW_KT_NM_PER_A / SHADOW_R_CONTACT_M:.4f}"]
+                    f"{tau_env * SHADOW_N_PER_A:.4f}"]
                    if SHADOW_TAU_ENV else [])
+                + ([f"{iq_a_hold:.4f}", f"{hold.e0:.0f}" if hold.active else ""] if hold else [])
+                + ([f"{iq_b_comp:.4f}"] if lcomp else [])
             )
             rows_logged += 1
 
@@ -952,6 +1047,10 @@ def main():
         if rows_logged == 0:
             os.remove(log_path)
             print("No data logged -- log discarded.")
+            # keep a leader-cal log (e.g. an aborted cal) for diagnosis
+            for src in (log_path[:-4] + "_cal.csv", log_path[:-4] + "_cal.json"):
+                if LIVE_LOG_DIR and os.path.exists(src):
+                    print(f"Kept {shutil.move(src, os.path.join(LOG_DIR, os.path.basename(src)))}")
         else:
             # Latency summary -- the headline numbers from the new columns,
             # so they don't have to be dug out of the CSV by hand.
@@ -969,7 +1068,8 @@ def main():
             if LIVE_LOG_DIR:
                 # Off the live path now: move RAM logs to their final place.
                 moved = [shutil.move(src, os.path.join(LOG_DIR, os.path.basename(src)))
-                         for src in (log_path, log_path[:-4] + "_frames.csv", png_path)
+                         for src in (log_path, log_path[:-4] + "_frames.csv", png_path,
+                                     log_path[:-4] + "_cal.csv", log_path[:-4] + "_cal.json")
                          if src and os.path.exists(src)]
                 log_path = final_log_path
                 png_path = next((m for m in moved if m.endswith(".png")), None)

@@ -3,9 +3,9 @@
 Running log of the Phase A–D plan, run on the Pi against the ESC_based
 firmware on both B-G431B-ESC1 boards. Newest entries at the bottom.
 
-## TL;DR (updated 2026-10-25, end of C3)
+## TL;DR (updated 2026-10-26, end of day: contact spring + in-session leader calibration adopted)
 
-**Status:** Phase A done; B mostly done; **C1–C3 done** (C3 operating point found); C4 and Phase D next. See "0a. RESUME HERE".
+**Status:** Phase A done; B mostly done; **C1–C3 done**; sustained holds fixed (contact spring); leader ripple largely compensated (in-session cal). Leader 7/rev in teleop, in-depth tuning and Phase D next. **See "0b. RESUME HERE".**
 
 | Step | Status |
 |---|---|
@@ -20,12 +20,15 @@ firmware on both B-G431B-ESC1 boards. Newest entries at the bottom.
 | C1 | **Gate A PASS (offline)**: free 10.3 mA (gentle motion), static ≤ 2.8 %, sign settled, rigid ≥ 6 N/mm vs foam ≈ 0.3 N/mm |
 | C2 | **PASS (live, 3D-printed arm, fitted model)**: free floor 19.1 mA (contact excluded; brief's 15 mA not met), static ≤ 5.0 %, loop p95 2.09 ms |
 | C3 | **Operating point K_F 1.0, KB_DAMP 0.35e-5, DB 20 mA**: free felt 18.7 mA (PASS), tap rise median 4 ms (PASS), user "light and responsive" with maybe one oscillation (marginal). Fallback KB 0.5e-5. Contact capped by the about 0.8 A ceiling |
+| Contact spring 2026-10-26 | **Holds fixed (user: "holds feel solid", no onset oscillation)**: `TELEOP_HOLD_K=0.5e-3 HOLD_MAX_A=0.05 HOLD_RAMP_S=0.3 IQ1_MAX_A=0.8`; hold slope −0.03/+0.02 A/s vs −0.3..−0.5 without. Before this fix: : a static press fades to 0 in 1–1.5 s (linear, about 0.5 A/s). Force circulates with loop gain 1 and leaks through the dead band and friction. Fix proposed: contact-latched position spring (C4 as written cannot fix it) |
+| Leader ripple 2026-10-26 | **In-session leader cal adopted (`TELEOP_LEADER_CAL=1`, user "felt better")**: 12/28/36-rev speed ripple cut 3–4×; 7/rev in teleop still open. Firmware CHANGE 3 (NB_CONVERSIONS 128) flashed, did not fix 7/rev; CHANGE 4 logged as future. See "0b. RESUME HERE" |
 
-**Blocker for closed-loop work:** host stalls of up to 2 s.
+**Host stalls:** fixed (RT priority + `TELEOP_LOG_DIR` RAM logging).
 
-- **To resume, read "Handoff → 0. Resume here" at the bottom of this
-  file** first. Then use the start-of-session checklist.
-- The code is committed and pushed on branch
+- **To resume, read "Handoff → 0b. RESUME HERE"** first (it has the
+  current operating-point command). Then use the start-of-session
+  checklist.
+- Code through 2026-10-28 is committed and pushed on branch
   `tune/current-sensing-gain-16x`.
 - **Logs are NOT in git.** `logs/` is git-ignored (about 183 MB). They
   stay on the Pi in `ESC_based/software/logs/`.
@@ -3063,6 +3066,1090 @@ TELEOP_LOG_DIR=/dev/shm/teleop_c3
 
 ---
 
+## 2026-10-26: Reference run at the operating point — sustained holds FADE (felt force not held)
+
+**Setup:**
+
+- ESCs power-cycled overnight.
+- `zero_iq_check.py` PASS: run0 Iq +0.0001 A on both, encoders loaded at 142.
+- 60 s run at the C3 operating point.
+- Log: `logs/REF_2026-10-26.csv` plus `_frames`.
+- Graph: `logs/REF_2026-10-26_reference.png` (`plot_reference.py`, new).
+
+**Routine (user):** free motion, presses, two 3–5 s steady holds, taps,
+then free motion.
+
+**Health:**
+
+- Duration 57.7 s.
+- Loop p50 2.00 ms, p95 2.06 ms, p99.9 2.55 ms, max 28.1 ms.
+- Fresh rate 1.000 on both nodes. No watchdog trip.
+- Free felt 13.3 mA + damping 16.6 mA rms. Contact felt 460 mA rms.
+- Peak force 0.71 N.
+
+**Result: presses work, but a held press does not.** The force builds,
+then decays nearly linearly to zero in 1–1.5 s, although the operator
+keeps the leader pushed in and both shafts are still:
+
+| Hold | Peak | Decay | Leader–follower err during the hold |
+|---|---|---|---|
+| 29.0–30.3 s | 0.70 A | 0.42 A in 0.75 s (≈0.56 A/s) | −1154 → −1240 counts (held) |
+| 33.25–34.75 s | 0.69 A | ≈0.43 A/s | +478 → +1142 (leader kept pushing) |
+| 36.5–37.75 s | 0.51 A | ≈0.40 A/s | +1331 → +1711 |
+| 39.5–40.5 s, 43.0–44.0 s | 0.57 A | ≈0.5 A/s | grows |
+
+**This corrects the earlier reading of the C3 log** ("force does not
+fade"). Those C3 contacts were all ≤ 1.2 s, i.e. shorter than the fade.
+
+**Cause** (from the logged terms; mechanism inferred, decay measured):
+
+1. **The follower's force comes only from the hand-torque feed-forward.**
+   During the hold, iq_a_ff = tau_h, and iq_a_cmd ≈ iq_a_ff. The
+   velocity P term is ≈ 0, because both shafts are still.
+2. **The leader observer's tau_h is the leader's own motor current.**
+   When the leader is static, tau_h equals that current, and that current
+   is K_F·deadband(tau_env).
+3. **So in a static press the force circulates around a loop with gain
+   K_F·FF = 1,** follower → tau_env → leader → tau_h → follower.
+4. **Nothing ties its level to how far the leader is pushed in.** The
+   position error is logged only, never used for control.
+5. **Each pass loses a constant amount:** the 20 mA dead band, plus
+   leader friction absorbed by a stiff hand.
+6. **That gives a linear decay** at a rate that does not depend on the
+   force level (observed: 0.4–0.56 A/s at every hold). A proportional
+   leak would decay exponentially instead.
+
+**Verdict vs the brief:** C4's pass criterion asks for "< 0.015 A change
+in felt force during a 5 s static press". This run measured a change of
+about 0.5 A, so it **FAILS**. As written, C4 cannot fix this, because
+its anchor is gated off and frozen during contact.
+
+**Proposed fix (not implemented; awaiting the user):** a flagged contact
+spring on the follower.
+
+- At contact onset (|tau_env| > gate), latch e0 = err.
+- While in contact, add i_hold = clamp(K_hold·(err − e0), ±0.8 A) to
+  iq_a_cmd.
+- The held force is then set by how far the leader is pushed past the
+  surface (a virtual spring), not by the circulating current.
+- Release when the leader backs out (err returns past e0) or contact
+  ends.
+- **Starting values:** K_hold 0.5–1e-3 A/count, i.e. 0.8 A at about
+  800–1600 counts = 72–144° (soft). The plant_id hold was stable at
+  KP 1.25e-3 with KD 1.5e-5.
+- **Prototype first:** replay this log to check the trigger and release
+  logic, then run live with free motion first.
+
+---
+
+## 2026-10-26: Contact spring built (TELEOP_HOLD_K), offline checks
+
+**Code:**
+
+- `contact_spring.py` (class `ContactSpring`; per-instance state,
+  timestamps).
+- Wired into `teleop_test.py` behind `TELEOP_HOLD_K` (A/count, default
+  0 = off) and `TELEOP_HOLD_MAX_A` (default 0.1 A).
+- Requires the `tau_env` felt path. Range-checked to K ≤ 2e-3 and
+  max ≤ 0.3 A.
+- New CSV columns: `iq_a_hold` and `hold_e0` (blank when not latched).
+
+**How it works:**
+
+- Engages at |tau_env| > 80 mA and latches e0 = err.
+- Pushes only toward the object, clamped to HOLD_MAX_A.
+- Releases after 50 ms below 40 mA, or when the follower moves faster
+  than 3000 counts/s.
+- An opposite-direction contact re-latches.
+
+**Offline replay** (open loop; `python3 contact_spring.py <log>`):
+
+| Log | Spring on | Contact | Sign matches the follower push | Nonzero with |tau_env| < 40 mA |
+|---|---|---|---|---|
+| REF_2026-10-26 | 44.0 % | 38.9 % | 97.7 % | 1.95 % |
+| C3_kf100_kb3.5e-6 | 34.2 % | 33.5 % | 94.9 % | 1.62 % |
+| C2_live_free (free motion only) | 1.1 % | 0.7 % | — | 0.29 % |
+
+- **Free-motion engages** are slow-motion estimator blips (tau_env about
+  −80 mA at 7.4–7.6 s in REF). They are bounded by the 0.1 A clamp and
+  the speed release.
+
+**Toy closed-loop sim** (`hold_sim.py`; inferred model):
+
+- **Setup:** rigid wall; leader inertia with G_B 7.9e6; 30 mA leader
+  Coulomb friction with stiction. The leader observer is modelled as it
+  really measures, a/G minus the motor current. The hand is a
+  spring-damper.
+- **With K = 0 it reproduces the bench fade:** 67–87 mA at 0.4 s, 0 by
+  0.8 s. This supports the cause: hand push taken by leader stiction is
+  invisible to the observer, and the dead band drains the rest.
+- **With the spring on, the hold is steady,** shows no oscillation, and
+  releases to 0 mA:
+
+| K (A/count) | Typical hand (mA at 0.4 / 1.5 / 2.4 s) | Stiff hand (mA at 0.4 / 1.5 / 2.4 s) |
+|---|---|---|
+| 0.25e-3 | 141 / 134 / 134 | 290 / 494 / 525 (slow wind-up, 80 mA ripple) |
+| 0.5e-3 | 217 / 274 / 274 | 445 / 727 / 735 |
+| 1e-3 | 287 / 314 / 314 | 643 / 835 / 835 |
+
+- **The held force tracks the hand's push,** which is rigid-wall
+  behaviour. K mainly sets the build-up speed.
+- **Not modelled:** follower dynamics, soft objects, and real sensor
+  noise. Stability in contact must be checked live.
+
+**Live plan:**
+
+- K = 0.5e-3, max 0.1 A, otherwise the C3 operating point.
+- 45 s run: free motion, then three 4 s holds (firm, light, firm), then
+  taps.
+- **Pass:**
+  - The felt force changes < 0.015 A over each held second (the brief's
+    C4 criterion, applied to a 4 s hold).
+  - No oscillation (felt, plus the log).
+  - Free felt within 20 % of REF (13.3 mA).
+  - Release clean: hold returns to 0 within 0.2 s of backing off.
+
+---
+
+## 2026-10-26: Contact spring live, run 1 (K 0.5e-3, max 0.1 A) — no fade within contacts; holds short; possible kick-out
+
+**Run:**
+
+- Log: `logs/HOLD_k5e-4_2026-10-26.csv` plus `_frames`.
+- Graph: `_reference.png`.
+- Same flags as REF, plus `TELEOP_HOLD_K=0.5e-3 TELEOP_HOLD_MAX_A=0.1`.
+- Duration 42.3 s. Loop p95 2.07 ms, max 32.3 ms. Fresh 100 %.
+- **Shutdown:** the stop sequence completed (CAN closed, logs moved,
+  `bus_check` afterwards OK, idle Iq about 0 A). A second SIGINT
+  interrupted only the final print.
+
+**Results:**
+
+| Check | HOLD (spring) | REF (no spring) | Verdict |
+|---|---|---|---|
+| Free felt rms | 10.9 mA | 13.3 mA | PASS (spring never on in free motion) |
+| Plateau slope of |tau_env| (contacts ≥ 0.5 s) | −0.19 to +0.24 A/s, about 0 | −0.32 to −0.67 A/s on the held contacts | fade gone within contacts |
+| Contact duration | 0.59–1.38 s (10 contacts) | 1.0–2.1 s | the 4 s holds did not happen |
+| Leader speed away from the object in the last 0.15 s of contact | 2950–4830 counts/s | 1300–2300 (presses), about 0 to +280 (holds) | **suspect kick-out** |
+| Leader-velocity ripple on plateaus (detrended std) | 2230 counts/s, peak 6–10 Hz | 1230 counts/s | 1.8× higher (possible ringing, or operator) |
+| Follower measured current peak | 0.92–1.04 A | 0.72–0.94 A | above the 0.8 A rating (IQ1_MAX_A = 1.0) |
+
+**Other observations:**
+
+- **14–19 s:** the leader went up to about 500° past the follower while
+  the felt force sat at about 0.6–0.7 A. The operator overpowered the
+  current ceiling, so the spring saturated at its clamp.
+- **10–13 s:** the leader stayed at the follower's position, i.e. the
+  wall-pinning behaviour.
+
+**Interpretation (inferred, pending the user's feel report):**
+
+- Within a contact the force no longer fades.
+- Contacts end with the leader leaving fast. That is consistent with the
+  circulating force winding up to the ceiling and shoving the leader out
+  (the "kick" risk noted in the build entry), or with the operator
+  releasing. The log alone cannot separate the two.
+- **Follower current:** the follower clamp (1.0 A) should come down to
+  0.8 A, because sustained holds now keep it there.
+
+**User feel (run 1):** "I did feel like they held, sometimes. I felt a
+little kick and some oscillations at first contact. I feel like it can
+be [ironed] out."
+
+---
+
+## 2026-10-26: Contact spring run 2 (K 0.5e-3, max 0.05 A, IQ1_MAX 0.8 A) — long holds HOLD; onset ringing traced to the spring
+
+**Run:**
+
+- Log: `logs/HOLD2_k5e-4_m05_2026-10-26.csv` plus `_reference.png`.
+- Flags: `TELEOP_HOLD_MAX_A=0.05`, `TELEOP_IQ1_MAX_A=0.8` (new flag; the
+  leader limit follows it).
+- Loop p95 2.07 ms. Free felt 11.7 mA. The spring never came on in free
+  motion.
+
+**Holds:**
+
+- 2.29 s, 1.57 s and 3.13 s holds, with plateau slopes −0.13, −0.13 and
+  0.00 A/s. Without the spring, held presses faded at −0.3 to −0.7 A/s,
+  so **the fade is fixed.**
+- **Brief criterion (< 15 mA per second): not met,** but not meaningful
+  here. The 1 s changes were 83–211 mA. Every hold sat at the 0.8 A
+  ceiling with the operator overpowering it: the leader was 800–1900
+  counts past the contact point. So these changes are hand variation at
+  saturation, not drift (inferred).
+- **Follower measured peak 0.82–0.89 A,** with the command clamped at
+  0.8 A.
+
+**Release kick hypothesis — not supported:**
+
+- Idea: the stored overshoot keeps the spring on through the release.
+- Toy sim with the 0.8 A ceiling: a sliding anchor (bounding the stored
+  overshoot) changed the release little (outward 1760 vs 2000 counts/s).
+- Dropped. The user's kick is at *first contact* anyway.
+
+**Onset ringing** (first 0.3 s of contacts ≥ 0.5 s):
+
+| Run | Median leader-velocity sign flips | 5–25 Hz leader-velocity energy | Onset peak / plateau |
+|---|---|---|---|
+| REF, no spring | 0 | 231 | 0.65 |
+| C3 KB 0.35e-5, no spring | 2 | 335 | 0.73 |
+| HOLD1, 0.1 A | 4 | 394 | 0.99 |
+| HOLD2, 0.05 A | 4 | 391 | 0.94 (max 1.55) |
+
+- The spring reached full output within 0.3 s, i.e. during the impact
+  transient, and ringing doubled.
+
+**Fix:**
+
+- **Ramp the spring in** over `TELEOP_HOLD_RAMP_S` (default 0.3 s; 0 =
+  the run 1–2 behaviour).
+- **Toy sim:** holds unchanged by 1.5 s (274 / 724 mA); slightly slower
+  build at 0.4 s (136 vs 217 mA).
+- **Next run:** run 2 flags plus the ramp. If onset ringing persists,
+  then KB_DAMP 0.5e-5.
+
+---
+
+## 2026-10-26: Contact spring run 3 (ramp-in 0.3 s) — PASS on feel; adopted
+
+**Run:**
+
+- Log: `logs/HOLD3_ramp03_2026-10-26.csv` plus `_reference.png`.
+- Scored with the new `hold_eval.py`, run on all of today's runs.
+
+| Run | Long-hold slope | Onset sign flips (median) | 5–25 Hz energy | Impact speed | Free felt |
+|---|---|---|---|---|---|
+| REF (no spring) | −0.32 / −0.52 A/s (holds fade) | 0 | 231 | 2200 counts/s | 13.3 mA |
+| HOLD1 | (no hold ≥ 1.5 s) | 4 | 394 | 2100 | 10.9 |
+| HOLD2 | −0.13 / −0.13 / 0.00 | 4 | 391 | 6800 | 11.7 |
+| **HOLD3 (ramp)** | **−0.03 / +0.02** | **2** | 429 | 3800 | **10.1** |
+
+- Loop p95 2.07 ms. Follower measured peak 0.89 A, with the command
+  clamp at 0.8 A.
+
+**User feel:** "it was better at first contact and there were no
+oscillations, the holds feel solid."
+
+**Adopted operating point** (supersedes C3):
+
+```
+TELEOP_FRAME_QUEUE=1 TELEOP_SHADOW_TAU_ENV=1 TELEOP_FOLLOWER_MODEL=follower_model_arm3d.json \
+TELEOP_FELT_SOURCE=tau_env TELEOP_K_F=1.0 TELEOP_FELT_DEADBAND_A=0.02 TELEOP_KB_DAMP=0.35e-5 \
+TELEOP_HOLD_K=0.5e-3 TELEOP_HOLD_MAX_A=0.05 TELEOP_HOLD_RAMP_S=0.3 TELEOP_IQ1_MAX_A=0.8 \
+TELEOP_LOG_DIR=/dev/shm/teleop timeout -s INT 45 taskset -c 2,3 python3 teleop_test.py
+```
+
+**Deferred to in-depth tuning (user: "later"):**
+
+- HOLD_K (0.5e-3 vs 1e-3; build-up speed).
+- Ramp length.
+- KB_DAMP 0.5e-5.
+- The brief's < 15 mA/s criterion, on a light hold below the 0.8 A
+  ceiling. Every hold so far was at the ceiling.
+- Engage/release thresholds.
+
+---
+
+## 2026-10-26: ESC dropout, then leader friction measurements (breakaway, spin, sweep)
+
+**ESC dropout** (after contact-spring run 3, before any friction test):
+
+- Both ESCs went off the bus: TELEM 0/s, and can0 ERROR-PASSIVE with
+  tx error counter 128 (no ACK).
+- The breakaway test aborted at its idle precheck. Nothing was
+  energized.
+- The user restored power/connectors. Both came back RESET (+28 A
+  idle), re-aligned, and `zero_iq_check` passed.
+- Same pattern as before (shared supply/connectors).
+
+**1. Breakaway, `breakaway_test.py --node B`** (new; 8 ramps at
+0.1 A/s, alternating direction):
+
+- Measured breakaway median 14 mA (dir +) and 13 mA (dir −), range
+  1–24 mA.
+- Log: `logs/breakaway_B.csv`.
+- **Caveat:** all 8 trials started near raw count 3972, i.e. one angle.
+  Each trial moved only about 5 counts before braking. This is the
+  bottom of an angle-torque well, not representative.
+
+**2. Spin, `spin_test.py --node B --speed 1000`:**
+
+- **P only:** did not move (15 mA command is below breakaway).
+- **With `--ki 2e-4`:** stick-slip, aborted on overspeed (10,226
+  counts/s) after 0.24 rev.
+  - Crept at 30–110 mA near raw 3970–110 and 600–700.
+  - Free-ran at 0–7 mA between those.
+- Logs: `logs/spin_B_+1000_0.15A_kv1.5e-05_ki0*.csv`.
+- **User:** no unbalanced load or cable on the leader; it spins freely.
+
+**3. Quasi-static sweep, `friction_map.py --node B`** (new):
+
+- **Method:** PD hold, KP 1e-3 A/count, KD 1.2e-5. Target walks +1.1
+  rev, then back, at 200 counts/s.
+- **Analysis:** mean of the two directions = angle-locked torque; half
+  the difference = friction. Validated on synthetic data.
+- **Run 1** aborted at 1 s on the 3000 counts/s speed limit. That was a
+  stick-slip burst, not oscillation: lag ≤ 50 counts, and it crept to
+  50 mA, then slipped at 4000 counts/s. MAX_VEL raised to 8000.
+- **Run 2** (`logs/friction_map_B_2.csv`, start raw 1257): completed.
+
+| Quantity | Value |
+|---|---|
+| Angle-locked torque | peak-peak 158 mA, rms 35.9 mA |
+| 7/rev (once per electrical cycle, 571 counts) | **36.2 mA, 42 % of variance** |
+| 28/rev | 10.2 mA (3.4 %) |
+| 84/rev | 5.8 mA (1.1 %) |
+| 1/rev, 2/rev | 2.0 and 1.2 mA (no mechanical or unbalanced load) |
+| Friction (half fwd−back) | mean 17 mA. Per-bin values are noisy from stick-slip (−19..51 mA); breakaway up to about 50 mA. |
+
+**Interpretation (inferred):**
+
+- The leader's dominant non-ideal is a **±36 mA torque ripple at
+  7/rev**: detents every 51°. It is larger than its Coulomb friction and
+  larger than the 20 mA felt dead band.
+- Once per electrical cycle is the signature of a current-sensor offset
+  (MCSDK recalibrates offsets at each START). Cogging or flux harmonics
+  could also cause it.
+- The leader's hand-torque observer sees this ripple as hand torque,
+  and so passes it to the follower as well.
+
+**Plan:**
+
+1. **Repeatability:** sweep again after a new START. If the amplitude or
+   phase moves, a fixed map won't work; then look at the offset
+   calibration on the dev machine instead.
+2. **If repeatable:** flagged leader feed-forward −r(θ) (7 + 28/rev),
+   the same r(θ) subtracted in the leader observer, and a small Coulomb
+   feed-forward (about 8 mA, smooth in v). A/B live.
+3. **Later:** check after an ESC power cycle. Run the same sweep on the
+   follower (with the arm attached, gravity becomes a 1/rev term).
+
+**4. Repeatability sweep** (`logs/friction_map_B_3.csv`, start raw 1279, new START):
+
+| Term | Sweep 2 | Sweep 3 | Repeatable? |
+|---|---|---|---|
+| 7/rev | 36.3 mA @ −52° | 24.4 mA @ −39° | **No** (|diff| 13.6 mA) |
+| 28/rev | 10.3 mA @ 107° | 10.1 mA @ 110° | yes (0.5 mA) |
+| 84/rev | 5.9 mA @ 97° | 3.2 mA @ 105° | roughly |
+| Coulomb | 16.8 mA | 17.1 mA | yes |
+
+**Firmware finding** (source in this repo):
+
+- MCSDK re-runs the current-offset calibration on every START:
+  `mc_interface.c:415` clears `offsetCalibStatus`, then
+  `mc_tasks_foc.c:298` calibrates.
+- It averages `NB_CONVERSIONS 16u` samples (`pwm_common.h:37`).
+- With 30–43 mA per-sample noise (A3), that leaves roughly ±10 mA of
+  offset per phase, different per START. That gives a 7/rev torque
+  ripple whose size and phase move between STARTs (inferred).
+
+**Candidate firmware change** (dev machine, not done; user chose host
+compensation first):
+
+- `NB_CONVERSIONS` 16 → 128.
+- **First check the R3_2 driver's averaging.** It is not in this repo.
+  If it divides by a hard-coded shift (`>> 4`) rather than
+  `/ NB_CONVERSIONS`, the shift must change too.
+- Hand edit only; never regenerate.
+
+**Host leader compensation built** (`leader_comp.py`, model
+`leader_comp_B.json`, fitted on sweeps 2 and 3):
+
+- **Model contents:** 28/rev 10.1 mA, 84/rev 4.4 mA, Coulomb 17.2 mA
+  (v0 300 counts/s). 7/rev is left out (not repeatable).
+- **Flags:**
+  - `TELEOP_LEADER_COMP=leader_comp_B.json` (default off).
+  - `TELEOP_LEADER_COMP_RIPPLE` (default 1.0) and
+    `TELEOP_LEADER_COMP_FRIC` (default 0.5, max 1). With the gain ≤ 1,
+    the friction feed-forward (8.6 mA) stays below the real friction
+    (17 mA running, 13–50 mA breakaway), so it cannot self-start the
+    leader (inferred).
+  - `TELEOP_LEADER_COMP_OBS` (default 1): i_b − d into the hand
+    observer.
+- **What it does:** feed-forward `iq_b_cmd += d(θ, v)`. Logged as
+  `iq_b_comp`.
+- **Offline:** removes 4–5 mA of the 37–44 mA sweep rms; the rest is
+  7/rev. d() costs 3.4 µs per call. On the HOLD3 log it would add
+  11.3 mA rms, max 20.6 mA.
+- **Next:** live A/B at the adopted operating point, with the comp on.
+
+---
+
+## 2026-10-26: Leader compensation live (LCOMP1) — no felt difference; firmware CHANGE 3 written
+
+**Context:** a second ESC dropout happened (idle, after the sweeps). The
+user re-plugged the ESC power, the boards re-aligned, and
+`zero_iq_check` passed.
+
+**Run:**
+
+- Log: `logs/LCOMP1_2026-10-26.csv` plus `_reference.png`.
+- Flags: adopted operating point + `TELEOP_LEADER_COMP=leader_comp_B.json`
+  (ripple ×1, friction ×0.5, observer on).
+- The comp added 10.8 mA rms, max 20.6 mA.
+
+| | HOLD3 (no comp) | LCOMP1 |
+|---|---|---|
+| Free tau_h rms | 21.5 mA | 20.3 mA |
+| Slow-motion tau_h rms | 13.3 mA | 14.1 mA |
+| Free felt | 10.1 mA | 13.0 mA |
+| Free follower command rms | 48 mA | 51 mA |
+| Onset sign flips | 2 | 4 (impacts 5855 vs 3824 counts/s) |
+
+- All within run-to-run spread.
+- **First 4.5 s hold:** 514 mA, below the ceiling, slope −0.01 A/s. Over
+  any 1 s it changed by up to 149 mA, but the leader moved 1205 counts
+  during the hold (operator, not drift). Wall stiffness below the
+  ceiling is noted for in-depth tuning.
+
+**User:** "same feeling".
+
+- **Verdict:** the repeatable part of the leader's disturbance is too
+  small to feel. Keep the flag (default off). The 7/rev ripple needs
+  the firmware fix.
+
+**Firmware CHANGE 3 written** in `ESC_based/FIRMWARE_CHANGES.txt`:
+
+- `NB_CONVERSIONS` 16u → 128u in `Inc/pwm_common.h`.
+- **Checks for the dev-machine session:**
+  - the R3_2 driver's divisor (must track NB_CONVERSIONS; stop and
+    report if it is a hard-coded shift);
+  - accumulator width;
+  - the uint8_t PolarizationCounter (so the value stays ≤ 255);
+  - the waitForPolarizationEnd timeout.
+- **Pi verification after the flash:** two sweeps with a START between.
+  Pass: 7/rev ≤ 12 mA and repeatable to ≤ 5 mA.
+
+---
+
+## 2026-10-26: Firmware CHANGE 3 flashed (NB_CONVERSIONS 128) — 7/rev ripple NOT fixed; it is systematic, not calibration noise
+
+**Setup:**
+
+- User flashed CHANGE 3 on both boards. The dev session's divisor
+  finding is not yet reported here; this Pi checkout still shows 16u,
+  because the dev edit was not pulled.
+- `bus_check`: both RESET, as expected. `zero_iq_check` PASS: run0
+  −0.0000 / +0.0003 A. RUN seen 2.43 s after START vs 2.42 s before
+  (DBG is 10 Hz, so this is not proof of the longer calibration).
+- Two `friction_map.py --node B` sweeps, a fresh START each, about
+  3 s apart: `logs/friction_map_B_4.csv` (start raw 210) and `_5.csv`
+  (raw 215).
+
+| Sweep | 7/rev | 28/rev | Coulomb |
+|---|---|---|---|
+| pre-flash A (B_2) | 36.3 mA @ −52° | 10.3 @ 107° | 16.8 |
+| pre-flash B (B_3) | 24.4 mA @ −39° | 10.1 @ 110° | 17.1 |
+| **post-flash A (B_4)** | **8.4 mA @ −51°** | 10.2 @ 107° | 18.2 |
+| **post-flash B (B_5)** | **38.7 mA @ −55°** | 11.1 @ 106° | 17.9 |
+
+**Within-sweep windows** (7/rev, about 11 s each, time since START):
+
+| Sweep | 0–11 s | 12–23 s | 24–35 s | 36–48 s |
+|---|---|---|---|---|
+| pre A | 20.4 @ −64° | 30.6 @ −84° | 40.5 @ −50° | 57.4 @ −41° |
+| pre B | 17.5 @ −46° | 24.2 @ −52° | 26.1 @ −32° | 30.0 @ −38° |
+| post A | 6.5 @ 173° (≈0) | 2.3 (≈0) | 18.9 @ −54° | 17.5 @ −47° |
+| post B | 37.5 @ −69° | 32.6 @ −63° | 40.8 @ −52° | 47.6 @ −49° |
+
+**Findings:**
+
+1. **CHANGE 3 did not remove the ripple** (post B 38.7 mA). Target
+   ≤ 12 mA and repeatable: **FAIL**.
+2. **The ripple's phase is nearly fixed** (−39° to −55°, plus −32° to
+   −84° in windows) while its size varies 2–57 mA. A random offset
+   residual would have a random phase. So this is a systematic error
+   along one fixed direction, and more averaging cannot fix it.
+3. **It grows while running** (pre A 20 → 57 mA over 48 s). After a long
+   idle it started near 0 (post A). A START about 3 s after a previous
+   sweep started high at once (post B 37.5 mA), so recalibrating at
+   START does not remove it.
+
+**Inferred** (not established): an error that exists in RUN but not at
+offset calibration (PWM off) and builds with time in RUN. Candidates:
+
+- board / analog-front-end heating from switching;
+- a PWM-state-dependent offset;
+- something in the 16x PGA path.
+
+Root cause would need firmware visibility: calibrated offsets and board
+temperature over CAN.
+
+**Practical fix (proposed): adaptive 7/rev canceller on the leader
+(host).**
+
+- Model: d7 = a·cos 7θ + b·sin 7θ.
+- Update a and b by slow LMS on the leader observer's residual, only
+  while the leader moves (covering angles). A static hand force at one
+  angle would otherwise bias it.
+- Add it to `leader_comp` (both feed-forward and observer).
+- This works whatever the cause, and tracks the in-run growth.
+
+---
+
+## 2026-10-26: Dev-session code review of the offset calibration (read-only) — answers and corrections
+
+The dev session made no edits, builds or flashes. It quoted code
+throughout.
+
+**CHANGE 3 is in the flashed build and effective:**
+
+- `pwm_common.h:37` is `128u`.
+- The disassembly of `R3_2_CurrentReadingPolarization` in both ELFs
+  shows `lsrs #7` (÷128).
+- `r3_2_g4xx_pwm_curr_fdbk.c:539-541` divides by `NB_CONVERSIONS`.
+- Accumulators are uint32; the counter is a uint8.
+- Each phase is summed over one pass: A+B in SECTOR_5, C in SECTOR_1.
+- The dev repo has it uncommitted (dev commit d9a55ef holds changes
+  1–2 only).
+
+**Correction to my earlier note:**
+
+- CAN START → `MCI_StartMotor()` does not clear `offsetCalibStatus`.
+  `mc_interface.c:415` is `MCI_StartWithPolarizationMotor`.
+- But the "already calibrated" branch (`mc_tasks_foc.c:298-311`) also
+  ends in `R3_2_CurrentReadingPolarization`, which has no guard. So
+  every START still re-measures all three offsets, in about 16 ms. The
+  conclusion stands; the route was wrong.
+
+**Calibration vs RUN:**
+
+| | Calibration | RUN |
+|---|---|---|
+| FETs | **all six off** (channels disabled, OSSR) | mid-period sample lands while the **low-side FETs conduct** (centre-aligned PWM; inferred) |
+| Phases A/B | ADC1 ch3 / ADC2 ch3 | same channels, sampling time and point |
+| Phase C | ADC1 ch12 | ADC2 ch18 in sectors 2–3 (high duty only, so probably unused at haptic duty) |
+
+- No settling wait before calibration. OPAMPs are enabled once at boot
+  (factory trim, gain 16).
+- No temperature, duty or dead-time compensation (DTCompCnt is never
+  read).
+- **Fixed per power-up:** encoder electrical offset (first START only).
+- **Every START:** the offsets.
+
+**Readback is available if wanted:**
+
+- `MC_GetPolarizationOffsetsMotor1()` and `NTC_GetAvTemp_C()` (board
+  NTC, 1 °C resolution).
+- A 10 Hz debug frame (u16 offA/B/C plus i16 °C) at 0x100+base+0x013
+  would fit the TX FIFO slack.
+- **Side note:** TELEM pauses about 16 ms at each START, during the
+  calibration (inferred).
+
+**What it means (inferred):**
+
+- With ÷128 confirmed, random averaging error is ruled out as the main
+  cause.
+- **The best-fitting explanation** is an offset that exists only while
+  the low-side FETs conduct. Calibration with every FET off cannot see
+  it, at any temperature. Its growth with time in RUN, and its
+  survival of a warm re-START, suggest it rises with board temperature.
+- **Alternative:** a plain thermal drift after calibration. That fits
+  the warm re-START less well, because calibrating warm should zero it.
+- **To tell them apart:** read back the offsets and the NTC per START
+  (optional CHANGE 4), and check whether the ripple tracks temperature.
+
+**Plan unchanged:** the host-side adaptive 7/rev canceller handles
+either cause. CHANGE 4 (diagnostic frame) is optional, for root cause.
+
+---
+
+## 2026-10-26: Adaptive 7/rev canceller — not viable with a hand on the leader (offline); "grows in RUN" claim corrected
+
+**Built offline:** `AdaptiveRipple`, an LMS on the leader observer's
+residual. It updated only at 200–3000 counts/s, out of contact.
+
+**Replay on four teleop logs:** it converged to 0.1–2.8 mA with
+inconsistent phase. Batch LS of 7/rev in −tau_h, out of contact:
+
+| Log | 100–600 counts/s | 600–1500 | 1500–3000 |
+|---|---|---|---|
+| REF | 0.6 mA | 2.1 | 2.7 |
+| HOLD3 | 3.4 | 6.4 | 1.0 |
+| LCOMP1 | 5.2 | 5.6 | 2.7 |
+| HOLD2 | 1.3 | 1.3 | 0.8 |
+
+- Phases are scattered, i.e. noise. This is not the 8–39 mA at −50°
+  seen in the sweeps.
+
+**Why** (reasoning, from the observer equations):
+
+- The observer measures total external torque, hand − d. A hand that
+  holds the leader's motion supplies the ripple torque itself (hand ≈
+  d − i_b), so hand − d ≈ −i_b. That carries no ripple.
+- The ripple is then *felt by the hand* but invisible to the estimator.
+- So LMS on tau_h cannot learn it during teleop. Disturbance and hand
+  reaction cannot be separated from i_b and acceleration alone.
+- **Removed from the code** (never wired into teleop).
+
+**Correction to the earlier sweep analysis:** "grows over time in RUN"
+is confounded with direction. Each sweep runs fwd first, then back, and
+**back > fwd in all four sweeps.**
+
+| Sweep | fwd | back | even (angle-locked) | odd (friction modulation) |
+|---|---|---|---|---|
+| pre A | 25.0 @ −75° | 48.6 @ −45° | 35.7 @ −55° | 14.8 @ 160° |
+| pre B | 21.0 @ −50° | 27.8 @ −35° | 24.2 @ −41° | 4.6 @ 180° |
+| post A | 3.8 @ −169° | 18.2 @ −51° | 8.4 @ −62° | 10.1 @ 139° |
+| post B | 35.0 @ −67° | 44.1 @ −50° | 39.1 @ −57° | 7.2 @ 173° |
+
+- **The even part dominates,** at a fixed phase of about −50°, and
+  varies per START (8–39 mA).
+- **Within-direction trends are mixed,** so time growth is not
+  established.
+
+**Open question for the user:** in teleop, turning the leader slowly,
+are there about 7 bumps per revolution (one every 51°)?
+
+- **If not noticeable:** drop it; the leader ripple is not what limits
+  feel.
+- **If yes:** a hands-off learning sweep (about 25 s) after each START
+  could set the 7/rev compensation for that START, or pursue the
+  firmware root cause (CHANGE 4).
+
+---
+
+## 2026-10-26: Slow-turn feel test, full harmonic scan (12/rev found), in-session leader calibration built
+
+**Slow-turn test:**
+
+- Log: `logs/RIPPLE_FEEL_2026-10-26.csv`. 30 s at the adopted operating
+  point, no leader comp; 5.1 rev of slow turning, 3 % contact.
+- **7/rev leader speed modulation:** ±282 counts/s (28 % of 1023 mean,
+  + direction) and ±291 (23 % of 1294, − direction). The slow
+  electrical-angle bins were 0.75–0.88× mean, the fast ones 1.27–1.34×.
+- The hand observer saw about 2 mA, as expected.
+- **User:** "the motor snapping at more than 7 spots across the full
+  turn at slow speeds; at higher speeds I didn't notice."
+
+**Full scan 1–100/rev** (mean of 3 sweeps; noise floor median 0.8 mA):
+
+| Harmonic | Amplitude |
+|---|---|
+| **12/rev** | **32.3 mA** (missed before: the earlier fits used only 1, 2, 7, 14, 21, 28, 84) |
+| 7/rev | 24.1 |
+| 28/rev | 11.4 |
+| 36/rev | 6.9 |
+| 42/rev | 4.6 |
+| 84/rev | 4.4 |
+| 14/rev | 3.9 |
+
+- 12/rev is a bump every 30°, matching "more than 7 spots". It fits a
+  12-slot stator (inferred).
+
+**Phase across power-ups:**
+
+- **12/rev:** −51/−50° (power-up 1), then 59/54° (power-up 2), at
+  32.7–34.8 mA. The shift of about 107° matches the alignment landing 6
+  electrical zeros away: 6 × 12 × 571.4/4000 × 360° ≡ 103°. 24/rev and
+  36/rev shifted as that model predicts.
+- **Multiples of 7** (14, 28, 42, 84/rev) are invariant. 7/rev amplitude
+  changes per START.
+
+**Consequence:**
+
+- A fixed map cannot work: the 12-family phase is per power-up, and the
+  7/rev amplitude is per START.
+- **In-session fit (offline, all 4 sweeps):** angle-locked rms 28–39 mA
+  → 10–16 mA. Fwd-only fit applied to the back leg: 13–25 mA, so the
+  calibration sweeps both ways.
+
+**Built:** `leader_cal.py`, plus `TELEOP_LEADER_CAL=1` in teleop (needs
+the frame queue).
+
+- **When:** after START, before the baselines.
+- **What it does:** a hands-off PD sweep of the leader, 1 rev each way
+  at 300 counts/s (about 30 s), with the follower sent 0 A each tick.
+  It fits 7, 12, 14, 24, 28, 36, 42 and 84/rev plus Coulomb, then uses
+  the result as the session's LeaderComp (ripple ×1, friction ×0.5,
+  observer on).
+- **Aborts** on lag > 300 counts, speed > 8000 counts/s, or stale
+  telemetry.
+- **Files:** `<log>_cal.csv` and `<log>_cal.json`.
+- **Offline check of `fit()`** on B_4 and B_5: it reproduces the sweep
+  harmonics.
+- **Next:** live A/B: calibration, then 30 s of slow turns. Compare the
+  12/7/28/rev leader speed modulation with RIPPLE_FEEL, plus the user's
+  feel.
+
+---
+
+## 2026-10-26: In-session leader calibration live (LCAL1) — 12/28/36-rev ripple cut 3–4×; user "felt better"; adopted
+
+**Run:**
+
+- Logs: `logs/LCAL1_2026-10-26.csv` plus `_frames`, `_cal.csv`,
+  `_cal.json`.
+- Flags: adopted operating point + `TELEOP_LEADER_CAL=1`; 65 s total.
+
+**Calibration (same START as the teleop):**
+
+- 25,670 frames.
+- 12/rev 35.8 mA, 28/rev 13.1, 36/rev 8.1, 14/rev 5.0, **7/rev 2.1 mA**
+  (small this START); Coulomb 16.2 mA.
+- Angle-locked rms 28.8 → 11.0 mA after the fit.
+- Teleop comp 28.4 mA rms. Loop 497 Hz, fresh 100 %.
+
+**Leader speed ripple** (% of mean |v|, per direction: a torque ripple
+gives a direction-odd signed-speed ripple, so pooling the directions
+cancels it):
+
+| Harmonic | RIPPLE_FEEL (no comp) | LCAL1 (calibrated) |
+|---|---|---|
+| 12/rev | 49 / 53 % | **17 / 13 %** |
+| 28/rev | 22 / 24 % | 12 / 3 % |
+| 36/rev | 10 / 14 % | 5 / 3 % |
+| 7/rev | 31 / 25 % | **41 / 44 %** (worse, unexplained) |
+
+- **Caveat:** the user turned about 2× faster (mean about 2100 vs
+  1000–1300 counts/s).
+- **7/rev is open.** The cal found only 2.1 mA, so the comp adds about
+  2 mA there and cannot cause it.
+  - **Candidate 1:** growth after the cal.
+  - **Candidate 2:** the follower's own 7/rev, via the felt path. The
+    follower's tau_env has 10–13 mA at the *follower's* 7/rev; the
+    felt + damping current has 4–5 mA at it; leader and follower
+    electrical angles are not locked (spread 154–161 counts of 571).
+  - Both are inferred.
+
+**User:** "it felt better." **Adopted:** add `TELEOP_LEADER_CAL=1` to the
+operating point. Note it costs about 30 s hands-off at every session
+start.
+
+---
+
+## 2026-10-28: 7/rev source analysis (offline) and growth test — leader 7/rev GROWS in RUN at 0 A
+
+**Session start:**
+
+- ESCs were off the bus (powered off overnight). The user powered them
+  on; `bus_check` showed RESET.
+- `zero_iq_check` PASS: run0 +0.0000 / −0.0000 A.
+
+**Offline: joint fit of leader 7/rev on leader AND follower angle**
+(leader–follower electrical offset is not locked, so the two are
+separable):
+
+| Leader signed-speed ripple, per direction | RIPPLE_FEEL | LCAL1 |
+|---|---|---|
+| 7/rev @ leader angle | 31 / 25 % | 30 / 36 % (≈ unchanged by the cal) |
+| 7/rev @ follower angle | 11 / 14 % | **58 / 48 %** |
+| 12/rev @ leader angle | 47 / 52 % | 12 / 9 % |
+
+- tau_env 7/rev @ follower angle: 5–8 mA (RIPPLE_FEEL), 11–13 mA
+  (LCAL1).
+- **(Inferred)** The rise in LCAL1 is mostly the follower's own 7/rev
+  reaching the leader through tau_env (the follower model has no ripple
+  terms).
+- The leader's own 7/rev survived the cal (the cal measured only
+  2.1 mA at START).
+
+**Growth test, `cal_repeat.py`** (new): one START of both boards, leader
+sweep, 60 s RUN at 0 A, sweep again. Files:
+`logs/cal_repeat_20261028_184217{_1.csv,_2.csv,.json}`.
+
+| Term | t = 0 s | t = 89 s |
+|---|---|---|
+| **7/rev** | **8.9 mA @ −138°** | **22.3 mA @ −63°** |
+| 12/rev | 34.6 @ 4° | 33.8 @ 5° |
+| 28/rev | 12.8 @ 111° | 13.2 @ 112° |
+| Coulomb | 16.1 | 18.1 |
+
+**Conclusions:**
+
+- **Measured:** 7/rev grows about 2.5× in 89 s in RUN with about 0 A,
+  in the same START. Nothing else changes.
+- **Interpretation (inferred):** the phase moves toward the usual −50°
+  to −60°, consistent with a small residual offset at START plus a drift
+  along a fixed direction. Since there is no load current, the driver
+  is time in RUN (board switching heat, or slow analog drift).
+- This **resolves the earlier confound:** the growth is real, and a
+  START-time cal under-measures 7/rev.
+
+**Next:** a longer growth curve (5 sweeps, 60 s apart, about 7.5 min).
+
+- If it saturates: warm up in RUN, then cal.
+- If not: periodic re-cal, or the firmware root cause (CHANGE 4, then a
+  calibration change).
+
+---
+
+## 2026-10-28: 7/rev growth curve (5 sweeps, one START) — saturates, τ ≈ 160 s, about 60–65 mA warm
+
+**Run:** `cal_repeat.py --n 5 --wait 60`. Log:
+`logs/cal_repeat_20261028_184505{_1..5.csv,.json}`. This START came
+about 2.5 min after the previous test (boards warm).
+
+| t after START | 0 s | 89 s | 178 s | 267 s | 356 s |
+|---|---|---|---|---|---|
+| 7/rev | 18.5 @ −24° | 35.2 @ −35° | 50.2 @ −32° | 61.4 @ −44° | 56.8 @ −37° |
+| 12/rev | 34.4 | 33.5 | 34.7 | 36.0 | 34.7 |
+| 28/rev | 14.6 | 13.4 | 12.4 | 12.9 | 12.3 |
+
+**Fit:**
+
+- A(t) = 17.6 + 47.9·(1 − e^(−t/160 s)) mA, asymptote about 65 mA, rms
+  error 3.0 mA.
+- The growth direction (successive complex differences) stays at −26°
+  to −83°.
+
+**Cold vs warm START:** 8.9 mA (cold, first test) vs 18.5 mA (warm
+START). A START recalibration does not remove the warm part.
+
+**Interpretation (inferred):** an offset present only while the bridge
+switches, which grows with board temperature. The START calibration
+(all FETs off) cannot see it.
+
+**Options put to the user:**
+
+1. Host warm-up (5–8 min RUN at 0 A), then cal.
+2. Firmware CHANGE 5: offset calibration with all three phases at 50 %
+   duty (zero net current), paired with CHANGE 4 (offsets + NTC
+   readback).
+3. Both. Recommended: 3.
+
+---
+
+## 2026-10-28: User chose option 3 — host warm-up + cal now; firmware CHANGE 4 + 5 logged for the next flash
+
+**Firmware, `FIRMWARE_CHANGES.txt`:**
+
+- **CHANGE 5 (FUTURE):** offset calibration with all three phases
+  switching at 50 % duty (zero net current), behind
+  `OFFSET_CALIB_SWITCHING`.
+- **The dev session must report before editing:** the bootstrap order
+  (cal currently precedes CHARGE_BOOT_CAP); a guard for a still shaft;
+  sampling-point behaviour with outputs enabled; faults stay armed.
+- **Pi verification:** warm `cal_repeat` should start near the cold
+  value. Pair with CHANGE 4's NTC readback.
+
+**Host, `teleop_test.py`:**
+
+- New `TELEOP_LEADER_WARMUP_S` (default 0; needs `TELEOP_LEADER_CAL=1`).
+- After START it holds both boards at 0 A in RUN for that long, then
+  runs the leader cal, all in the same START.
+- 300 s ≈ 85 % of the warm 7/rev, 480 s ≈ 95 % (τ 160 s).
+- **Next:** warm-up 300 s + cal + 30 s slow turns. Compare 7/rev at the
+  leader angle with LCAL1 (30 / 36 %).
+
+---
+
+## 2026-10-28: Warm-up + cal live (LCAL2–4)
+
+**LCAL2 (warm-up 300 s):**
+
+- The cal found **7/rev 57.7 mA** (on the growth plateau), 12/rev
+  34.9 mA, 28/rev 14.0 mA; locked rms 49.0 → 13.8 mA.
+- The teleop part was not exercised (leader moved 7 counts in 42 s; the
+  user missed the cue).
+- The leader did not creep with the comp on (2.9 mA rms).
+
+**LCAL3 (warm-up 120 s):**
+
+- The cal ABORTED at 5.7 s: lag +306 counts at −3155 counts/s. The
+  leader was pushed back about 230 counts against +260 mA, i.e. a hand
+  on the leader (inferred; my cue was unclear).
+- The abort worked.
+- **Fix:** an aborted cal's `_cal.csv` is now kept in `logs/`
+  (`logs/LCAL3_abort_2026-10-28_cal.csv`).
+
+**LCAL4 (warm-up 120 s):** `logs/LCAL4_warm_2026-10-28{,_frames,_cal}.csv`
+plus `_cal.json`.
+
+- Cal: **7/rev 43.0 mA**, 12/rev 35.1, 28/rev 13.6, 36/rev 7.2,
+  Coulomb 17.8; locked rms 41.6 → 11.4 mA.
+- Teleop: 20.2 rev turned, 2 % contact. The mean |v| was 2308 / 2615
+  counts/s (faster than "slow").
+
+Leader signed-speed ripple, % of mean |v| (+ / −), joint fit on leader and
+follower angle:
+
+| | RIPPLE_FEEL (none) | LCAL1 (cold cal) | LCAL4 (warm cal) |
+|---|---|---|---|
+| 7/rev @ leader | 31 / 25 | 30 / 36 | **8 / 24** |
+| 12/rev | 47 / 52 | 12 / 9 | 10 / 7 |
+| 28/rev | 23 / 24 | 10 / 1 | 8 / 7 |
+| 7/rev @ follower | 11 / 14 | 58 / 48 | 15 / 11 |
+
+**Reading:**
+
+- Warm-up + cal cuts the leader 7/rev in + by about 4× and in − by
+  about 1.5×. After 120 s the ripple is still growing (the curve says
+  about 70 % of plateau), so a longer warm-up should help − further
+  (inferred).
+- The LCAL1 follower-angle 7/rev (48–58 %) coincided with 32 % contact,
+  against 2 % now. It is probably contact-related, not a steady
+  feedthrough (inferred).
+- **Pending:** the user's feel report.
+
+**User feel (LCAL4 vs cold cal):** "the same, it really seems like a
+secondary issue."
+
+**Decision:**
+
+- Stop the leader ripple work here.
+- Keep `TELEOP_LEADER_CAL=1` in the operating point. It costs about
+  30 s; the 2026-10-26 run "felt better".
+- `TELEOP_LEADER_WARMUP_S` stays available, default 0.
+- Firmware CHANGE 4 / 5 stay logged as future (root cause of the
+  growing 7/rev).
+- **Next:** move toward the end goal (Phase D) or in-depth tuning; the
+  user decides.
+
+---
+
+## 2026-10-28: D1 attempt (teleop presses on the scale) and static force calibration on the 3D arm — force factor +22 %; current measurement breaks down above about 0.5 A
+
+**D1 teleop run:**
+
+- Log: `logs/D1_scale_2026-10-28{,_frames,_cal}.csv`. Operating point
+  plus leader cal.
+- 10 steady plateaus (6–22 mN std each), follower still (0–3 counts),
+  tau_env ≈ measured follower current (model terms 1–2 mA).
+- **User readings, in order:** 22, 33, 65, 70, 45, 60, 59, 43 g. "The
+  values oscillated … the hold wasn't very smooth."
+- **Pairing to the plateaus is ambiguous:** some plateaus span two
+  levels. The low levels matched (22/22, 33/32 g); the high levels read
+  20–30 % low.
+- D1 verdict deferred. A cleaner protocol is needed (timestamped
+  readings, levels below the clip).
+
+**Static calibration:**
+
+- `b7_force_cal.py --sign -1 --log logs/D1_static_arm3d_2026-10-28.csv`
+  (new `--log` option). Follower tip on the scale, re-tared with the
+  arm resting at 0 A.
+- 7 levels, 5 s each. Scale readings: 3, 11, 21, 30, 48, 72, 99 g.
+
+| Command | Measured |iq| mean (p5–p95) | Scale | Kt/r prediction (0.853 N/A) |
+|---|---|---|---|
+| 0.05 | 0.050 (0.034–0.066) | 3 g | 4 g |
+| 0.10 | 0.099 (0.082–0.115) | 11 | 9 |
+| 0.20 | 0.197 (0.181–0.214) | 21 | 17 |
+| 0.30 | 0.297 (0.276–0.314) | 30 | 26 |
+| 0.45 | 0.444 (0.412–0.463) | 48 | 39 |
+| 0.60 | **0.574 (0.463–0.663)** | 72 | 51 |
+| 0.80 | **0.654 (0.490–0.827)** | 99 | 57 |
+
+**Findings:**
+
+1. **Force factor at the tip:** 1.044 N/A over levels 2–5 (R² 0.9954,
+   intercept −1 mN). That is **+22 % vs Kt/r** (64.6 mN·m/A ÷ 75.7 mm).
+   - Either Kt is higher than B7's (B7's lever was "roughly 160 mm"), or
+     the effective radius is shorter.
+   - Feel is unaffected (current-to-current mirror). Reported N and D1
+     estimates are about 18 % low.
+2. **Above about 0.5 A the measured Iq falls short and gets noisy,
+   while the force keeps rising.**
+   - From the levels 2–5 fit, the implied real current is **0.68 A at
+     0.60 A commanded and 0.93 A at 0.80 A commanded.**
+   - So the measurement degrades, and the current loop over-drives the
+     real current, **past the 0.8 A rating at a 0.8 A command**
+     (inferred from force).
+   - This is the earlier "contact force tops out about 0.55 A" ceiling.
+   - **Candidate (inferred):** at higher duty, R3_2 reads phase C on
+     ADC2 ch18 but applies the offset calibrated on ADC1 ch12 (dev
+     review 2026-10-26).
+   - **Alternative:** voltage saturation. It fits worse, because the
+     force kept rising.
+
+**Proposed to the user:**
+
+1. Safety cap `TELEOP_IQ1_MAX_A=0.5` until resolved.
+2. Dev-session questions: shunt/gain chain and clip current; bus voltage
+   and phase resistance; the duty and current at which the phase-C read
+   path switches; whether CHANGE 5 should calibrate C on both channels.
+3. Report force with the measured 1.044 N/A.
+
+**User decisions (2026-10-28):**
+
+1. **Do NOT cap the motor current.** `TELEOP_IQ1_MAX_A` stays 0.8,
+   accepting that a 0.8 A command may deliver about 0.93 A (inferred)
+   until the measurement is fixed.
+2. **Force reporting uses the measured 1.044 N/A.** It changes
+   `SHADOW_N_PER_A` in `teleop_test.py` (the `tau_env_N` column, from
+   now on) and `plot_reference.py` (`--n-per-a`, default 1.044). Logs
+   before 2026-10-28 have `tau_env_N` at 0.853 N/A; `plot_reference`
+   recomputes from `tau_env`, so old plots re-render correctly.
+3. **Dev-session questions written** on the current-measurement
+   breakdown above about 0.5 A (read-only).
+
+---
+
+## 2026-10-28: Dev-session review of the current-measurement breakdown above about 0.5 A (read-only)
+
+**Range clipping: ruled out.**
+
+- Shunt 3 mΩ; OPAMP PGA 16× with a 0.571 offset network, i.e. 9.14 net,
+  27.4 mV/A.
+- The zero-current level is 2.057 V, which gives about +71 / −42 A
+  swing. The firmware's M1_MAX_READABLE_CURRENT is 60.2 A.
+- **1 ADC step = 29.4 mA.**
+- The conversion was updated for 16× (CURRENT_CONV_FACTOR 544). SET_IQ
+  truncation makes TELEM about 0.1 % low.
+- The `.stwb6` file still says gain 4.568 (8×), so regenerating would
+  revert it.
+
+**Phase-C ch18 offset mismatch: real, but probably not the cause yet.**
+
+- Sectors 2–3 read C on ADC2 ch18 using the PhaseCOffset calibrated on
+  ADC1 ch12 (`r3_2.c:714`).
+- SECTOR_5 (A+B only) is forced while 5312 − lowDuty > Tafter (807
+  counts), i.e. modulation m·k < 0.696.
+- With Rs 5.29 Ω that is about 0.88–1.02 A of stall current at 12 V
+  (0.73–0.85 A with a hot motor). The 0.60 A point (about 0.68 A real)
+  should still be forced; 0.80 A (about 0.93 A real) is on the
+  boundary.
+
+**Voltage limit:**
+
+- MAX_MODULE 29162 (89 %). The circle limit comes after the PI (PI
+  limits ±32767; the integrator can wind past it).
+- Stall current at the limit: about 1.13 A at 12 V, about 0.94 A at
+  12 V with a hot motor. NOMINAL_BUS 13 V; measured Vbus is used only
+  for OV/UV.
+- **Key clue (dev):** with an unsaturated integral PI, the *mean*
+  measured Iq must equal the command. A lasting shortfall (0.574 vs
+  0.60) means the PI output hits a limit at least part of the time.
+  Logging Vqd.q is the most useful single measurement.
+
+**Other:**
+
+- **Hypothesis (dev, inferred):** the sampling window shrinks with
+  duty, from 9.9–10.6 µs at 0.45 A to 7.1–8.3 µs at 0.68 A. If the
+  front end settles slower than about 7 µs, samples read low, the PI
+  pushes harder, and the window shrinks further. That matches "falls
+  short, noisy, real overshoots", but needs settling well above the
+  listed 1 µs tRise.
+- No field weakening or MTPA. Direct SET_IQ is not clamped.
+- **Unrelated safety finding (dev):** the OCP comparators (COMP1/2/4 vs
+  DAC3) sit *before* the PGA. The "×2 for 8×→16×" rescaling of
+  DAC_OCP_Threshold (16334, `mc_parameters.c:165-168`) therefore
+  **raised the physical over-current trip point.** The dev session
+  recommends reverting it.
+
+**Tests the dev session suggested:**
+
+1. Vbus 11 V vs 14 V. If the breakdown scales with Vbus, it is
+   duty-related; if not, analog.
+2. A different rotor angle (8.6° mechanical = one electrical sector).
+3. Firmware logging of Vqd.q and Sector.
+
+**Fix options (dev):**
+
+- Per-path offset calibration (a, b, c_ch12, c_ch18) via the `__weak`
+  overrides R3_2_CurrentReadingPolarization / GetPhaseCurrents. It fits
+  with CHANGE 5's switching calibration.
+- Or MAX_MODULE about 69 % (keeps forced SECTOR_5; stall ceiling about
+  0.88 A at 12 V).
+- A gain change is not useful.
+
+**Note:** the dev machine does not have FIRMWARE_CHANGES.txt changes
+3–5 (the Pi's 2026-10-26/28 edits are not committed or pushed).
+
+---
+
 ## Phase A summary (2026-10-20)
 
 | Step | Result | Key number |
@@ -3093,7 +4180,84 @@ improvement plan" brief, Phases A–D. Its steps, pass thresholds and
 rules are restated below where they matter. Everything here was checked
 against the code and the logs above.
 
-### 0a. RESUME HERE (current state, 2026-10-25, end of C3) — supersedes the table in 0
+### 0b. RESUME HERE (state at end of 2026-10-26) — supersedes 0a
+
+**Today, in order:**
+
+1. **Reference graph tool:** `plot_reference.py`.
+2. **Sustained holds fixed.** The contact spring (`contact_spring.py`,
+   `TELEOP_HOLD_*`, ramp-in 0.3 s) is adopted; user: "holds feel
+   solid", no onset oscillation.
+3. **Follower and leader clamp:** `TELEOP_IQ1_MAX_A=0.8` (thermal
+   rating).
+4. **Leader friction and ripple measured** (`breakaway_test.py`,
+   `friction_map.py`).
+   - Coulomb about 17 mA; breakaway 13–50 mA.
+   - **Ripple:** 12/rev about 33 mA (stator-locked; phase per power-up),
+     7/rev 8–41 mA (fixed phase, amplitude per START), 28/rev about
+     11 mA, 36/rev about 7 mA.
+5. **Fixed comp file** (`leader_comp.py`, `leader_comp_B.json`, 28 + 84
+   + friction): no felt change. The flag stays, default off.
+6. **Firmware CHANGE 3** (NB_CONVERSIONS 128) flashed. It did not fix
+   7/rev (systematic, not averaging noise). Dev review: calibration runs
+   with all FETs off, while RUN samples with the low sides on.
+   **CHANGE 4** (offsets + NTC diagnostic frame) is logged as FUTURE in
+   `FIRMWARE_CHANGES.txt`.
+7. **Adaptive 7/rev canceller:** not viable. A hand on the knob makes
+   the ripple unobservable to the hand observer. Removed.
+8. **In-session leader calibration** (`leader_cal.py`,
+   `TELEOP_LEADER_CAL=1`): adopted. 12/28/36-rev speed ripple cut 3–4×;
+   user "felt better".
+
+**Operating point (use this):**
+
+```
+cd ESC_based/software
+TELEOP_FRAME_QUEUE=1 TELEOP_SHADOW_TAU_ENV=1 TELEOP_FOLLOWER_MODEL=follower_model_arm3d.json \
+TELEOP_FELT_SOURCE=tau_env TELEOP_K_F=1.0 TELEOP_FELT_DEADBAND_A=0.02 TELEOP_KB_DAMP=0.35e-5 \
+TELEOP_HOLD_K=0.5e-3 TELEOP_HOLD_MAX_A=0.05 TELEOP_HOLD_RAMP_S=0.3 TELEOP_IQ1_MAX_A=0.8 \
+TELEOP_LEADER_CAL=1 TELEOP_LOG_DIR=/dev/shm/teleop timeout -s INT 90 taskset -c 2,3 python3 teleop_test.py
+```
+
+- **The first about 30 s is the leader calibration:** HANDS OFF the
+  leader. The follower is limp (0 A), so keep it clear of the object.
+  The timeout includes the cal.
+- **Scoring tools:**
+  - `hold_eval.py <logs>`: holds and onset.
+  - `plot_reference.py <log>`: graph.
+  - `leader_cal.py <log>_cal.csv`: re-fit a cal.
+
+**Session start:**
+
+1. `bus_check.py`.
+2. If RESET, `zero_iq_check.py`, with the follower arm free to swing
+   about 45° and the leader free.
+3. ESC dropouts happened twice today while idle (both boards at once;
+   can0 ERROR-PASSIVE with tx counter 128). The user re-plugged the ESC
+   power each time. If telemetry is 0/s, ask the user to check the ESC
+   supply/connectors.
+
+**Next (user's priority is feel):**
+
+1. **Leader 7/rev during teleop:** CLOSED 2026-10-28 (user: secondary). It grows in RUN (τ 160 s, about 60 mA warm); firmware CHANGE 4/5 are logged. Warm-up + cal helps one direction, but there was no felt change.
+   - Test the follower-feedthrough hypothesis offline: does the leader's
+     felt current carry the follower's 7/rev?
+   - If yes: a follower in-session cal, the same method on the follower
+     (with the arm, gravity is 1/rev), feeding its ripple into the
+     follower model / tau_env.
+   - Otherwise: re-run the cal mid-session, or pursue firmware CHANGE 4.
+2. **In-depth tuning (deferred by the user):**
+   - HOLD_K, ramp, KB_DAMP 0.5e-5;
+   - light-hold steadiness (< 15 mA/s, below the ceiling);
+   - wall stiffness below the ceiling (the leader moved 1205 counts in a
+     4.5 s hold).
+3. Oscillation detector.
+4. Phase D (blind rigid vs soft).
+
+**Commit state:** 2026-10-26/28 work committed and pushed 2026-10-28. The
+dev-machine edit for CHANGE 3 is still uncommitted on the dev machine.
+
+### 0a. RESUME HERE (state 2026-10-25, end of C3) — superseded by 0b
 
 **Done:**
 
@@ -3134,6 +4298,10 @@ TELEOP_LOG_DIR=/dev/shm/teleop timeout -s INT 60 taskset -c 2,3 python3 teleop_t
 
 **Next, in the user's priority order (feel first):**
 
+0. **DONE (2026-10-26): sustained holds.** The contact spring is
+   adopted. **Use the operating point in "Contact spring run 3"** (it
+   adds the HOLD_* flags and `TELEOP_IQ1_MAX_A=0.8` to the command
+   below). In-depth tuning is deferred (see that entry).
 1. **Leader stiction compensation:** measure the leader's breakaway and
    running friction; add a flagged feed-forward, starting at about half
    the measured friction.

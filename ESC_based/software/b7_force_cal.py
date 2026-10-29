@@ -48,10 +48,10 @@ EXPECT_N_PER_A = 3.3      # 1 A ~ 66 mN m at a 2 cm link
 LOG = os.path.join("logs", "B7_cal.csv")
 
 
-def run(sign):
+def run(sign, log=LOG):
     os.makedirs("logs", exist_ok=True)
-    if os.path.exists(LOG):
-        print(f"{LOG} exists -- move it first so calibration data is never overwritten")
+    if os.path.exists(log):
+        print(f"{log} exists -- move it first (or pass --log) so calibration data is never overwritten")
         return 1
     print("Schedule (time from START):")
     t = LEAD_S
@@ -118,12 +118,12 @@ def run(sign):
         except Exception as e:
             print(f"[warn] stop sequence: {e}")
         m.stop_listening()
-    with open(LOG, "w", newline="") as f:
+    with open(log, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["level", "iq_cmd", "bus_time", "mcu_time_us", "enc", "iq_meas"])
         w.writerows(rows)
-    print(f"{reason}. Log: {os.path.abspath(LOG)}")
-    summarize(LOG)
+    print(f"{reason}. Log: {os.path.abspath(log)}")
+    summarize(log)
     return 0 if reason == "done" else 1
 
 
@@ -173,12 +173,13 @@ def main():
     ap.add_argument("--sign", type=int, choices=(1, -1))
     ap.add_argument("--fit")
     ap.add_argument("--grams", type=lambda s: [float(x) for x in s.split(",")])
+    ap.add_argument("--log", default=LOG, help="output log for a run (default logs/B7_cal.csv)")
     a = ap.parse_args()
     if a.fit:
         return fit(a.fit, a.grams)
     if a.sign is None:
         ap.error("--sign +1/-1 (the current sign that presses INTO the scale) is required")
-    return run(a.sign)
+    return run(a.sign, a.log)
 
 
 if __name__ == "__main__":

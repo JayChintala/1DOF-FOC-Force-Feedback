@@ -1,13 +1,19 @@
 FIRMWARE CHANGES FOR THE DEV MACHINE (ESC_based, both B-G431B-ESC1 boards)
-Written 2026-10-25 on the Pi. Repo branch: tune/current-sensing-gain-16x.
+Written 2026-10-25 on the Pi; CHANGE 3 added 2026-10-26.
+Repo branch: tune/current-sensing-gain-16x.
 Context and test results: ESC_based/software/TEST_LOG.md ("Firmware changes"
-section near the top; the B1 and "SD-card write stalls" entries explain why).
+section near the top; the B1, "SD-card write stalls" and 2026-10-26 "leader
+friction measurements" entries explain why).
 
 ===========================================================================
 INSTRUCTIONS FOR THE CLAUDE CODE SESSION
 ===========================================================================
 
-Make exactly the two changes below. Do not change anything else.
+STATUS: CHANGES 1 and 2 are ALREADY APPLIED and flashed (2026-10-25). CHANGE 3
+was flashed 2026-10-26 (dev review confirmed /128 in the ELF); it did NOT
+remove the 7/rev ripple (systematic, see TEST_LOG) but is kept. Check
+they are present (do not apply them twice), then make ONLY CHANGE 3.
+Do not change anything else.
 
 HARD RULES
 - Hand-edit the source files only. NEVER regenerate code from Motor Control
@@ -124,6 +130,193 @@ FILE: Inc/couple_ctrl.h  (about line 113)
     (couple_ctrl.c uses the macro at about lines 265-267; no change there.)
 
 ===========================================================================
+CHANGE 3 (2026-10-26): average the current-sensor offset calibration longer
+===========================================================================
+
+WHY
+Measured on the Pi with a slow position sweep of the free leader
+(friction_map.py): the leader has an angle-locked torque ripple at 7/rev
+(once per electrical cycle) of 36 mA in one START and 24 mA, 13 deg shifted,
+in the next. Everything else repeated (28/rev 10.1 vs 10.3 mA, friction
+17.1 vs 16.8 mA). An electrical-frequency ripple that changes between STARTs
+is the signature of a phase-current offset error: MCSDK re-measures the
+offsets on every START (correction 2026-10-26 from the dev review: not via
+MCI_StartMotor, but the "already calibrated" IDLE branch in mc_tasks_foc.c
+still calls R3_2_CurrentReadingPolarization, which re-measures), and it
+averages only NB_CONVERSIONS = 16 samples. With the measured 30-43 mA
+per-sample noise that leaves roughly +-10 mA of random offset per phase,
+new each START. 8x more samples -> about 2.8x smaller offset error.
+It is the largest remaining feel defect on the leader (detents every 51 deg,
+bigger than the 20 mA felt dead band), and a host-side map cannot cancel it
+because it moves every START.
+
+FILE: Inc/pwm_common.h  (line 37)
+
+    CHANGE
+      #define NB_CONVERSIONS 16u
+    TO
+      #define NB_CONVERSIONS 128u /* was 16u: offset calibration averaging; see FIRMWARE_CHANGES.txt CHANGE 3 */
+
+CONSTRAINTS TO CHECK BEFORE BUILDING (report what you find for each)
+
+(a) THE AVERAGING DIVISOR. The offsets are accumulated and divided in the
+    R3_2 current-feedback driver, which is NOT in the git repo (MCSDK is
+    git-ignored). The project links it from
+      MCSDK_v6.4.2-Full/MotorControl/MCSDK/MCLib/G4xx/Src/r3_2_g4xx_pwm_curr_fdbk.c
+    (see STM32CubeIDE/.project). Find where PhaseAOffset / PhaseBOffset /
+    PhaseCOffset are summed (the HFCurrentsPolarization* functions) and
+    where the sum is turned into the offset (CurrentReadingPolarization /
+    the end of calibration).
+      - If it divides by NB_CONVERSIONS (or by an expression of it), nothing
+        else to change.
+      - If it divides by a HARD-CODED shift or constant tied to 16 (e.g.
+        ">> 4", ">> 3", "/ 16u", or a shift that assumes 16 samples per
+        sector pass), STOP and report the exact lines to the user before
+        changing anything. Do not guess the new shift: note that 3-shunt
+        polarization may sum each phase over two sector passes, so the
+        divisor may be 2*NB_CONVERSIONS.
+      - Check the accumulator type: with 128 samples of a left-aligned
+        16-bit ADC value (up to 65520) the sum reaches about 8.4e6, which
+        needs uint32_t / int32_t (fine), not 16 bits. If it is 16-bit, STOP
+        and report.
+(b) THE COUNTER TYPE. PolarizationCounter is uint8_t (Src/mc_config.c line
+    179, and waitForPolarizationEnd(..., volatile uint8_t *cnt) in
+    Src/pwm_common.c). So NB_CONVERSIONS must stay <= 255. 128 is fine; do
+    NOT use 256.
+(c) THE TIMEOUT. Src/pwm_common.c waitForPolarizationEnd computes
+      hMaxPeriodsNumber = (2 * NB_CONVERSIONS) * ((repCnt + 1) >> 1)
+    as uint16_t. With 128 that is 256 * ((repCnt + 1) >> 1): check repCnt
+    (the TIM1 repetition counter used by R3_2) keeps it below 65535 (it
+    will unless repCnt is huge). No change expected.
+(d) Search the whole build (Src, Inc, STM32CubeIDE/Application, and the
+    linked MCSDK sources) for any other use of NB_CONVERSIONS and report it.
+
+EXPECTED SIDE EFFECT
+Offset calibration at START takes 8x longer: roughly 2 x 128 PWM periods at
+16 kHz, i.e. about 16 ms instead of 2 ms. The Pi scripts wait for RUN, so
+nothing on the Pi changes.
+
+===========================================================================
+CHANGE 4 (FUTURE -- DO NOT APPLY YET; logged 2026-10-26 at the user's request)
+Diagnostic CAN frame: calibrated phase offsets + board temperature, 10 Hz
+===========================================================================
+
+WHY
+The leader's 7/rev ripple has a fixed phase, grows over time in RUN and
+survives a fresh START (TEST_LOG 2026-10-26). Calibration runs with all six
+FETs off, while RUN samples mid-period with the low sides conducting.
+Reading the offsets and the board NTC back per START, and checking whether
+the ripple tracks temperature, separates the two candidate causes: (a) an
+offset that exists only while the FETs conduct (calibration cannot see it),
+or (b) a thermal offset drift after calibration. The Pi currently works
+around the ripple with an adaptive canceller; this change is for root cause.
+
+WHAT (as described by the dev-session review, 2026-10-26; verify before use)
+- Offsets: MC_GetPolarizationOffsetsMotor1(PolarizationOffsets_t*)
+  (mc_api.c:693-696). Returns false before the first calibration. Fields are
+  int32_t but hold averages of left-aligned 16-bit ADC values, so they fit
+  in uint16.
+- Temperature: NTC_GetAvTemp_C(&TempSensor_M1) (ntc_temperature_sensor.c:197),
+  int16 deg C, board NTC, updated in the safety task.
+- Frame: 8 bytes [0..1] u16 offA, [2..3] u16 offB, [4..5] u16 offC,
+  [6..7] i16 deg C, little-endian like TELEM. ID 0x100 + base + 0x013
+  (0x113 / 0x133), outside the node block like DBG; transmit-only.
+- ADDED 2026-10-28 (current-measurement breakdown above ~0.5 A, TEST_LOG):
+  a second diagnostic frame at 10 Hz (or a faster rate if the TX FIFO
+  allows; report what is safe) with FOCVars[M1].Vqd.q and .d (int16 each),
+  the PWMC _Super.Sector after the sample-point setup (uint8), and a flag
+  for "SECTOR_5 forced this period" (uint8); remaining 2 bytes: the max
+  |Vqd| since the last frame (int16). ID e.g. 0x100 + base + 0x014. The dev
+  review called Vqd.q "the most useful single measurement": a lasting
+  measured-Iq shortfall means the Iq PI output is hitting a limit.
+- Send: a SendCalib() from CAN_ControlTick (can_driver.c:514) every 100th
+  tick. TX FIFO has 3 elements; TELEM + DBG use 2 per tick, so count drops
+  the same way as s_telemTxDropCount.
+- Pi side: a parser in ESC_based/software/can_interface.py (Pi session).
+- Same hard rules as above: hand edit only, never regenerate.
+
+===========================================================================
+CHANGE 5 (FUTURE -- DO NOT APPLY YET; logged 2026-10-28 at the user's request;
+apply together with CHANGE 4, behind a compile-time switch)
+Offset calibration with the bridge SWITCHING at 50 % duty (zero net current)
+===========================================================================
+
+WHY (Pi measurements, TEST_LOG 2026-10-28)
+The leader's 7/rev torque ripple (an Iq error at the electrical frequency =
+a phase-current offset error) grows while in RUN at ~0 A: 8.9 -> 22.3 mA in
+89 s; in a 6 min run 18.5 -> 35 -> 50 -> 61 -> 57 mA, fit
+17.6 + 47.9 (1 - e^(-t/160 s)) mA, always along the same phase. A fresh
+START on a warm board starts at 18.5 mA (cold: 8.9 mA), so re-calibrating
+does NOT remove it. Calibration runs with all six FETs off
+(R3_2_CurrentReadingPolarization: LL_TIM_CC_DisableChannel CH1/2/3 + MOE,
+OSSR), while RUN samples mid-period with the low-side FETs conducting.
+Hypothesis (inferred): an offset that exists only while the bridge
+switches and grows with board temperature, invisible to an all-off
+calibration. Calibrating under the same switching conditions as RUN, with
+equal duty on all three phases (no line-line voltage -> ~0 current), would
+capture it. CHANGE 4's readback (offsets + NTC per START) tests this:
+with CHANGE 5, a warm START should begin near the cold value, not higher.
+
+WHAT (for the dev session to design and REPORT BEFORE EDITING; MCSDK files
+are git-ignored, so record every edit exactly)
+- In the R3_2 polarization path (r3_2_g4xx_pwm_curr_fdbk.c, around lines
+  476-575 and R3_2_HFCurrentsPolarizationAB/C ~1343/~1392), instead of
+  disabling CH1/2/3, program all three compare registers to 50 % of the
+  period (Half_PWMPeriod/2 in the center-aligned counter, or whatever gives
+  equal duty) and enable the outputs, so the bridge switches exactly as in
+  RUN at zero voltage vector; keep the ADC trigger at the RUN mid-period
+  point. Restore the normal sequence afterwards.
+- Behind  #define OFFSET_CALIB_SWITCHING 1  (0 = stock all-off calibration)
+  so it can be rolled back without code edits.
+- CHECK AND REPORT FIRST:
+  (a) Bootstrap: calibration currently happens BEFORE CHARGE_BOOT_CAP.
+      With switching, the high-side drivers need charged bootstrap caps;
+      decide whether to run CHARGE_BOOT_CAP first (reorder in
+      mc_tasks_foc.c IDLE/OFFSET_CALIB/CHARGE_BOOT_CAP) or rely on the
+      low-side on-time. Report the safer sequence.
+  (b) Shaft must be still: equal duties give ~0 current only without
+      back-EMF. START is only sent with the shaft at rest by the Pi
+      scripts; note any firmware guard you would add (e.g. skip
+      switching calibration if |speed| > small threshold).
+  (c) Dead-time: equal on all three legs, so no net current expected;
+      confirm nothing (e.g. sector-dependent sampling in
+      R3_2_SetADCSampPointPolarization) breaks with outputs enabled.
+  (d) Overcurrent/fault paths stay armed during calibration.
+- Same hard rules: hand edit, never regenerate; report the diff and build
+  result; do not flash until the user says so.
+
+ADDED 2026-10-28: per-read-path phase-C offset (from the dev review).
+Sectors 2-3 read C on ADC2 ch18 (OPAMP3 internal output) but subtract the
+PhaseCOffset calibrated on ADC1 ch12 (r3_2.c:714). Fold into CHANGE 5:
+calibrate one offset per (ADC, channel, OPAMP-output) path -- a, b, c_ch12,
+c_ch18 -- via a third polarization pass with PolarizationSector = SECTOR_2,
+using the __weak R3_2_CurrentReadingPolarization / R3_2_GetPhaseCurrents
+overrides in user code (MCSDK copy untouched). PolarizationOffsets_t needs
+a fourth field for Set/Get.
+
+VERIFY ON THE PI AFTER FLASHING (with CHANGE 4)
+cal_repeat.py --n 5 --wait 60 cold, then again warm right after: with
+CHANGE 5 the 7/rev at t=0 of the WARM run should be ~cold value and the
+growth within a START smaller; CHANGE 4's NTC trace shows the temperature.
+
+===========================================================================
+CHANGE 6 (FUTURE -- recommended at the next flash; logged 2026-10-28)
+SAFETY: revert the over-current threshold rescaling
+===========================================================================
+
+WHY (dev-session review 2026-10-28)
+The OCP comparators (COMP1/2/4 vs DAC3, main.c:437-505) compare the OPAMP
+INPUTS (PA1/PA7/PB0), i.e. BEFORE the PGA. The "x2 for 8x->16x" rescaling
+of DAC_OCP_Threshold (16334, mc_parameters.c:165-168) therefore did not
+keep the physical trip current the same -- it RAISED it.
+
+WHAT
+Restore DAC_OCP_Threshold to the value that gives the original physical
+trip current (the pre-16x value, or recompute from the shunt and the
+comparator input network). Report the old value, the new value and the
+resulting physical trip current in amps before changing it.
+
+===========================================================================
 NOT INCLUDED (decided by the user)
 ===========================================================================
 - B5, clamping direct SET_IQ at +-0.8 A, was DROPPED by the user, who says a
@@ -132,6 +325,13 @@ NOT INCLUDED (decided by the user)
 ===========================================================================
 AFTER FLASHING (done on the Pi, for reference)
 ===========================================================================
+CHANGE 3: bus_check.py, zero_iq_check.py, then two friction_map.py --node B
+sweeps with a START between. Pass: 7/rev amplitude well below 24-36 mA
+(target <= 12 mA) and repeatable between the two STARTs (|diff| <= 5 mA);
+28/rev and friction unchanged. Then refit leader_comp_B.json, now including
+7/rev if it repeats.
+
+Earlier changes (1-2), already verified 2026-10-25:
 Both boards will power-cycle, so the Pi's bus_check.py shows RESET. The Pi
 session then runs zero_iq_check.py (re-aligns the encoders), and the B4
 checks: a 30 s HOLD zero-gain run on the free follower (Iq std >= 2x lower
