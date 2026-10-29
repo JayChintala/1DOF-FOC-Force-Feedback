@@ -4444,6 +4444,39 @@ against the code and the logs above.
 
 ### 0c. RESUME HERE (state at end of 2026-10-28) — supersedes 0b and 0a
 
+> **UPDATE (later 2026-10-28):** firmware **b26c643 (CHANGE 7) is now
+> FLASHED on both boards** (user), superseding 75a893b below.
+>
+> - It adds runtime Tafter via SET_PARAM (`can_interface.send_tafter`,
+>   400..2040 counts, stock 807; MaxModule follows: 89 / 85 / 70.5 % at
+>   807 / 1360 / 2040).
+> - It adds the DIAG2 frame (0x115/0x135, `get_diag()["diag2"]`: Vq
+>   before the limit, circle-limited and non-forced period counts per
+>   frame, Tafter in use).
+> - DIAG flags are now RUN-only; bit6 = SET_PARAM rejected.
+>
+> **NEXT STEPS, in order, each with the user's go:**
+>
+> 1. `bus_check.py` (both boards will show RESET after the flash),
+>    plus a quick passive listen for 0x115/0x135 at 10/s.
+> 2. `zero_iq_check.py`: follower arm free to swing about 45°, leader
+>    free.
+> 3. `python3 tafter_sweep.py` (about 75 s, defaults 807,1360,2040 ×
+>    0.3,0.45,0.6,0.8 A). The user holds the follower arm still near the
+>    tip at a bad angle: about 40–70° electrical, where
+>    electrical = (raw mod 571.43)/571.43·360. After alignment the arm
+>    usually rests near raw ≈ 4116 ≈ 73°.
+>    - **Pass:** measured Iq within 2 % of command up to 0.8 A, std ≤
+>      25 mA.
+>    - **Spike check:** DIAG2 circle-limited count per frame. 1–5 means
+>      rare real spikes; about 1600 means a firmware logic bug.
+> 4. **If one Tafter fixes it:** make it the default (a dev change, or
+>    send it at each START from the Pi), then redo the scale check
+>    (force linear to 0.8 A at about 1.044 N/A) and D1.
+> 5. **If none fixes it:** report the table to the dev session (next
+>    ideas: sample-point placement, C-edge coupling into the A/B
+>    shunts).
+
 **Where things stand:**
 
 1. **Feel (done, adopted):**
