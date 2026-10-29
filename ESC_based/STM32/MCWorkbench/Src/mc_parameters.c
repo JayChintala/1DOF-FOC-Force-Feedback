@@ -162,10 +162,21 @@ const R3_2_Params_t R3_2_ParamsM1 =
   .DAC_Channel_OVP       = (uint32_t)0,
 
 /* DAC settings --------------------------------------------------------------*/
-  /* Scaled x2 for the 8x->16x AMPLIFICATION_GAIN change (power_stage_parameters.h)
-     to preserve the original ~30A physical overcurrent trip point -- this is a
-     baked-in literal, not a formula, so it does not update automatically. */
+  /* CHANGE 6 (FIRMWARE_CHANGES.txt): the OCP comparators COMP1/2/4 compare
+     the OPAMP INPUTS (PA1/PA7/PB0, before the PGA) with DAC3, so this
+     threshold does NOT depend on the PGA gain. The earlier x2 rescaling for
+     8x->16x (16334) therefore raised the physical trip current instead of
+     keeping it. 8167 is the Workbench-generated value (MCWorkbench.ioc
+     M1_DAC_CURRENT_THRESHOLD, for WB_UI_OCP_THRESHOLD = 90 A).
+     OCP_DAC_REVERT_PRE16X 0 = the rescaled 16334. */
+#ifndef OCP_DAC_REVERT_PRE16X
+#define OCP_DAC_REVERT_PRE16X 1
+#endif
+#if OCP_DAC_REVERT_PRE16X
+  .DAC_OCP_Threshold     = 8167,
+#else
   .DAC_OCP_Threshold     = 16334,
+#endif
   .DAC_OVP_Threshold     = 23830,
 
 };

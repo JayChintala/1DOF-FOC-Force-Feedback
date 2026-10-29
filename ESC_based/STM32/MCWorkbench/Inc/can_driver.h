@@ -57,6 +57,12 @@
  * outrank ESC 2's TELEM at 0x032. */
 #define CAN_ID_DBG(base) (0x100 + CAN_ID_TELEM(base))
 
+/* CHANGE 4 diagnostic frames, transmit-only, beside DBG and for the same
+ * reason: 0x113/0x133 and 0x114/0x134 sit below all control traffic in
+ * arbitration. Not the retired 0x013/0x014 -- those stay unused. */
+#define CAN_ID_CALIB(base) (0x100 + (base) + 0x013)
+#define CAN_ID_DIAG(base) (0x100 + (base) + 0x014)
+
 /* Standard-ID filter elements CAN_Driver_Init() configures: one range for
  * this node's commands, one exact match for the peer's TELEM. The FDCAN
  * only evaluates the first StdFiltersNbr elements, so FDCAN1.StdFiltersNbr
@@ -126,9 +132,51 @@
  * TELEM has no spare byte left, which is the only reason DBG is a second
  * ID rather than more fields. Two frames per tick still fit the three-
  * element Tx FIFO documented in SendTelemetry(); a third would not leave
- * room for a retransmission backlog. Pack anything new into DBG. */
+ * room for a retransmission backlog. Pack anything new into DBG.
+ *
+ * EXCEPTION (CHANGE 4, CAN_DIAG_FRAMES): CALIB and DIAG are each sent on one
+ * tick in CAN_DIAG_DIVIDER, on different ticks (slot 0 and slot
+ * CAN_DIAG_DIVIDER/2), so no tick carries more than three frames. They are
+ * queued after TELEM and DBG and carry the lowest-priority IDs, so they
+ * cannot delay that tick's TELEM; drops are counted like TELEM's.
+ *
+ * CALIB payload, 8 bytes, little-endian -- the current-sense offsets in use,
+ * raw left-aligned ADC units exactly as R3_2_GetPhaseCurrents() subtracts
+ * them; all zero until the first offset calibration completes:
+ *   [0..1] uint16   phase A offset (ADC1 ch3)
+ *   [2..3] uint16   phase B offset (ADC2 ch3)
+ *   [4..5] uint16   phase C offset, ADC1 ch12 path (sectors 1, 6)
+ *   [6..7] uint16   phase C offset, ADC2 ch18 path (sectors 2, 3); 0 when
+ *                   OFFSET_CALIB_CH18 / OFFSET_CALIB_SWITCHING is off
+ *
+ * DIAG payload, 8 bytes, little-endian -- the current loop, sampled at 16 kHz:
+ *   [0..1] int16    Vqd.q (FOCVars[M1].Vqd.q, after circle limitation)
+ *   [2..3] int16    Vqd.d
+ *   [4]    uint8    _Super.Sector after the sample-point setup, i.e. the
+ *                   read path of the next period: SECTOR_1 = 0 ... SECTOR_6
+ *                   = 5; 4 (SECTOR_5) also when SECTOR_5 is forced
+ *   [5]    uint8    CAN_DIAG_FLAG_* below. bit0 is a snapshot of the same
+ *                   period as [4]; bits 1, 3, 4 are sticky since the
+ *                   previous DIAG; bits 2, 5 are build/calibration state.
+ *                   Bits 0, 1, 3, 4 are only updated in normal sampling with
+ *                   the PWM on (not during offset calibration).
+ *   [6..7] int16    board NTC temperature, deg C (NTC_GetAvTemp_C) */
 
 #define CAN_DBG_IDLE_DIVIDER 100u /* 10 Hz DBG while nothing is coupled */
+
+/* CHANGE 4: 1 = send CALIB and DIAG; 0 = neither (and no HF snapshot). */
+#ifndef CAN_DIAG_FRAMES
+#define CAN_DIAG_FRAMES 1
+#endif
+
+#define CAN_DIAG_DIVIDER 100u /* CALIB and DIAG each at 10 Hz */
+
+#define CAN_DIAG_FLAG_SECTOR5_FORCED 0x01u /* snapshot: A+B read forced    */
+#define CAN_DIAG_FLAG_CIRCLE_SEEN    0x02u /* sticky: circle limit hit     */
+#define CAN_DIAG_FLAG_OFFSET_SW      0x04u /* OFFSET_CALIB_SWITCHING built */
+#define CAN_DIAG_FLAG_NONFORCED_SEEN 0x08u /* sticky: natural sector read  */
+#define CAN_DIAG_FLAG_CH18_SEEN      0x10u /* sticky: sectors 2-3 (ch18)   */
+#define CAN_DIAG_FLAG_CALIB_SWITCHED 0x20u /* last calibration switched    */
 
 /* One sample of this node's encoder and clocks, taken together at the top
  * of the 1 kHz tick, so TELEM, DBG and the coupling law all describe the
@@ -169,6 +217,7 @@ bool CAN_GetPeerSample(const CAN_TickSample_t* now, CAN_PeerSample_t* out);
  * pattern if that's added later. */
 uint32_t CAN_GetTelemTxDropCount(void);
 uint32_t CAN_GetDbgTxDropCount(void);
+uint32_t CAN_GetDiagTxDropCount(void); /* CALIB + DIAG */
 
 /* ---- Iq telemetry conditioning ----
  * Defined in the USER CODE blocks of mc_tasks_foc.c, because that is where
@@ -181,5 +230,18 @@ uint32_t CAN_GetDbgTxDropCount(void);
 void IqTelem_UpdateHF(int16_t iq_s16);
 float IqTelem_GetEwma(void);
 float IqTelem_GetMeanAndReset(void);
+
+/* ---- DIAG snapshot (CHANGE 4) ----
+ * Same arrangement as IqTelem: defined in mc_tasks_foc.c USER CODE blocks,
+ * updated by the 16 kHz task, drained by can_driver.c once per DIAG. */
+typedef struct {
+  int16_t vq;     /* FOCVars[M1].Vqd.q */
+  int16_t vd;     /* FOCVars[M1].Vqd.d */
+  uint8_t sector; /* SECTOR_1 = 0 ... SECTOR_6 = 5 */
+  uint8_t flags;  /* CAN_DIAG_FLAG_* bits 0, 1, 3, 4 */
+} CAN_DiagSample_t;
+
+void Diag_UpdateHF(void);
+void Diag_GetAndReset(CAN_DiagSample_t* out);
 
 #endif /* CAN_DRIVER_H */

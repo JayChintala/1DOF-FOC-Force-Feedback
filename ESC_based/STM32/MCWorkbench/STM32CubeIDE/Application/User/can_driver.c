@@ -15,6 +15,10 @@
 #include "mc_parameters.h" /* for scaleParams_M1 (s16A -> Amps), used only
                               if the Iq sent below is switched to the
                               IqTelem EWMA -- see SendTelemetry() */
+#if CAN_DIAG_FRAMES
+#include "mc_config_common.h" /* TempSensor_M1 (DIAG) */
+#include "offset_calib.h"     /* ch18 offset (CALIB), calibration mode (DIAG) */
+#endif
 
 /* B4: TELEM Iq = mean of every 16 kHz sample since the previous TELEM
    (IqTelem_GetMeanAndReset, raw s16A, scaled to Amps). 0 = the old raw
@@ -87,9 +91,11 @@ static uint32_t s_peerSeq = 0u; /* Rx-interrupt-only */
  * to expose it. */
 static volatile uint32_t s_telemTxDropCount = 0;
 static volatile uint32_t s_dbgTxDropCount = 0;
+static volatile uint32_t s_diagTxDropCount = 0; /* CALIB + DIAG */
 
 uint32_t CAN_GetTelemTxDropCount(void) { return s_telemTxDropCount; }
 uint32_t CAN_GetDbgTxDropCount(void) { return s_dbgTxDropCount; }
+uint32_t CAN_GetDiagTxDropCount(void) { return s_diagTxDropCount; }
 
 /* ---- Microsecond timebase ----
  *
@@ -507,6 +513,58 @@ static void SendDebug(const CAN_TickSample_t* s) {
   }
 }
 
+#if CAN_DIAG_FRAMES
+/* CHANGE 4 -- layouts in can_driver.h. The offsets cannot be caught
+   mid-calibration: R3_2_CurrentReadingPolarization() runs blocking in the
+   MF task, which this hook follows in the same SysTick. */
+static void SendCalib(void) {
+  uint16_t off[4] = {0u, 0u, 0u, 0u};
+  PolarizationOffsets_t po;
+  if (MC_GetPolarizationOffsetsMotor1(&po)) {
+    off[0] = (uint16_t)po.phaseAOffset;
+    off[1] = (uint16_t)po.phaseBOffset;
+    off[2] = (uint16_t)po.phaseCOffset;
+    off[3] = OffsetCalib_GetPhaseCCh18();
+  }
+
+  uint8_t payload[8];
+  memcpy(&payload[0], off, sizeof(off));
+
+  FDCAN_TxHeaderTypeDef hdr;
+  FillTxHeader(&hdr, CAN_ID_CALIB(CAN_NODE_BASE));
+  if (HAL_FDCAN_AddMessageToTxFifoQ(s_hfdcan, &hdr, payload) != HAL_OK) {
+    s_diagTxDropCount++;
+  }
+}
+
+static void SendDiag(void) {
+  CAN_DiagSample_t d;
+  Diag_GetAndReset(&d);
+
+  uint8_t flags = d.flags;
+#if OFFSET_CALIB_SWITCHING
+  flags |= CAN_DIAG_FLAG_OFFSET_SW;
+#endif
+  if (OffsetCalib_LastUsedSwitching()) {
+    flags |= CAN_DIAG_FLAG_CALIB_SWITCHED;
+  }
+  int16_t const ntc_c = NTC_GetAvTemp_C(&TempSensor_M1);
+
+  uint8_t payload[8];
+  memcpy(&payload[0], &d.vq, sizeof(int16_t));
+  memcpy(&payload[2], &d.vd, sizeof(int16_t));
+  payload[4] = d.sector;
+  payload[5] = flags;
+  memcpy(&payload[6], &ntc_c, sizeof(int16_t));
+
+  FDCAN_TxHeaderTypeDef hdr;
+  FillTxHeader(&hdr, CAN_ID_DIAG(CAN_NODE_BASE));
+  if (HAL_FDCAN_AddMessageToTxFifoQ(s_hfdcan, &hdr, payload) != HAL_OK) {
+    s_diagTxDropCount++;
+  }
+}
+#endif /* CAN_DIAG_FRAMES */
+
 /* The scheduler starts running this hook inside MX_MotorControl_Init(),
  * which main() calls BEFORE MX_FDCAN1_Init() and CAN_Driver_Init(). Until
  * the driver is up there is no peripheral to send on and no clock to read,
@@ -520,4 +578,17 @@ void CAN_ControlTick(void) {
   Couple_Tick(&s);
   SendTelemetry(&s); /* TELEM first: the peer's coupling law is waiting on it */
   SendDebug(&s);
+#if CAN_DIAG_FRAMES
+  /* One diagnostic frame on two ticks in CAN_DIAG_DIVIDER, never both on
+     the same tick -- see the TX budget note in can_driver.h. */
+  static uint32_t diagSlot = 0u;
+  if (diagSlot == 0u) {
+    SendCalib();
+  } else if (diagSlot == (CAN_DIAG_DIVIDER / 2u)) {
+    SendDiag();
+  }
+  if (++diagSlot >= CAN_DIAG_DIVIDER) {
+    diagSlot = 0u;
+  }
+#endif
 }

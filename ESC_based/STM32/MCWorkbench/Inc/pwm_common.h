@@ -34,7 +34,7 @@ extern "C" {
 /**
   * @brief  The maximum number of needed PWM cycles. verif?
   */
-#define NB_CONVERSIONS 16u
+#define NB_CONVERSIONS 128u /* was 16u: offset calibration averaging; see FIRMWARE_CHANGES.txt CHANGE 3 */
 
 /** @addtogroup MCSDK
   * @{

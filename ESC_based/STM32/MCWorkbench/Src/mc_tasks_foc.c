@@ -119,6 +119,17 @@ static volatile float    s_iqTelemEwma     = 0.0f;
 static volatile float    s_iqTelemAccum    = 0.0f;
 static volatile uint32_t s_iqTelemAccumCnt = 0u;
 
+/* ---- DIAG frame snapshot (CHANGE 4, FIRMWARE_CHANGES.txt) ------------------
+ * Written at 16 kHz by Diag_UpdateHF() right after FOC_CurrControllerM1(),
+ * drained by can_driver.c's DIAG send (10 Hz). Telemetry only: nothing here
+ * is read by the control loop. Vqd is packed into one word so the 1 kHz
+ * reader can never pair a q from one cycle with a d from another. */
+#include "can_driver.h" /* CAN_DIAG_FLAG_*, CAN_DiagSample_t */
+
+static volatile uint32_t s_diagVqd    = 0u; /* Vqd.q in bits 0..15, Vqd.d in 16..31 */
+static volatile uint8_t  s_diagSector = 0u;
+static volatile uint8_t  s_diagFlags  = 0u; /* CAN_DIAG_FLAG_* bits 0, 1, 3, 4 */
+
 /* USER CODE END Private Variables */
 
 /* Private functions ---------------------------------------------------------*/
@@ -178,6 +189,72 @@ float IqTelem_GetMeanAndReset(void)
   __set_PRIMASK(primask);
 
   return (cnt > 0u) ? (sum / (float)cnt) : s_iqTelemEwma;
+}
+
+/* Called from FOC_HighFrequencyTask at 16 kHz, after FOC_CurrControllerM1()
+ * has run PWMC_SetPhaseVoltage(), so _Super.Sector is the read path the
+ * NEXT period's R3_2_GetPhaseCurrents() will use. The path flags are only
+ * updated while the normal sampling callback is installed with the PWM on,
+ * i.e. not during offset calibration (which forces its own sectors). */
+void Diag_UpdateHF(void)
+{
+  qd_t const v = FOCVars[M1].Vqd;
+  s_diagVqd = (uint32_t)(uint16_t)v.q | ((uint32_t)(uint16_t)v.d << 16);
+
+  PWMC_R3_2_Handle_t const *const h = &PWM_Handle_M1;
+  if (h->_Super.PWMState &&
+      (h->_Super.pFctSetADCSampPointSectX == &R3_2_SetADCSampPointSectX))
+  {
+    uint8_t const sector = h->_Super.Sector;
+    /* bit0 is a snapshot of this period; the others are sticky. */
+    uint8_t f = s_diagFlags & (uint8_t)~CAN_DIAG_FLAG_SECTOR5_FORCED;
+
+    /* The exact test R3_2_SetADCSampPointSectX() just made. */
+    if ((uint16_t)(h->Half_PWMPeriod - h->_Super.lowDuty) > h->pParams_str->Tafter)
+    {
+      f |= CAN_DIAG_FLAG_SECTOR5_FORCED;
+    }
+    else
+    {
+      f |= CAN_DIAG_FLAG_NONFORCED_SEEN;
+    }
+    if ((SECTOR_2 == sector) || (SECTOR_3 == sector))
+    {
+      f |= CAN_DIAG_FLAG_CH18_SEEN;
+    }
+
+    /* Circle_Limitation() puts a limited vector on the circle, short only by
+       its integer square-root truncation, so |Vqd|^2 >= M^2 - 2M catches
+       every limited period (and only vectors within ~1 LSB of the circle
+       otherwise). Avoids editing the generated FOC_CurrControllerM1(). */
+    int32_t const m = (int32_t)CircleLimitationM1.MaxModule;
+    int32_t const sq = ((int32_t)v.q * v.q) + ((int32_t)v.d * v.d);
+    if (sq >= ((m * m) - (2 * m)))
+    {
+      f |= CAN_DIAG_FLAG_CIRCLE_SEEN;
+    }
+
+    s_diagSector = sector;
+    s_diagFlags = f;
+  }
+}
+
+/* Snapshot for the DIAG frame; clears the sticky flags, so it must be called
+ * exactly once per DIAG. Holds the ISR off for a few cycles. */
+void Diag_GetAndReset(CAN_DiagSample_t *out)
+{
+  uint32_t const primask = __get_PRIMASK();
+  __disable_irq();
+
+  uint32_t const vqd = s_diagVqd;
+  out->sector = s_diagSector;
+  out->flags = s_diagFlags;
+  s_diagFlags = 0u;
+
+  __set_PRIMASK(primask);
+
+  out->vq = (int16_t)(uint16_t)(vqd & 0xFFFFu);
+  out->vd = (int16_t)(uint16_t)(vqd >> 16);
 }
 
 /* USER CODE END Private Functions */
@@ -670,6 +747,9 @@ __weak uint8_t FOC_HighFrequencyTask(uint8_t bMotorNbr)
    * current cycle's value. Telemetry conditioning only -- does not write
    * back into FOCVars, so the PI controllers are unaffected. */
   IqTelem_UpdateHF(FOCVars[M1].Iqd.q);
+#if CAN_DIAG_FRAMES
+  Diag_UpdateHF(); /* DIAG frame snapshot (CHANGE 4), telemetry only */
+#endif
 
   /* USER CODE END HighFrequencyTask SINGLEDRIVE_2 */
   if(hFOCreturn == MC_DURATION)
