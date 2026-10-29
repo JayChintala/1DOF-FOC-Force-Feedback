@@ -19,6 +19,9 @@
 #include "mc_config_common.h" /* TempSensor_M1 (DIAG) */
 #include "offset_calib.h"     /* ch18 offset (CALIB), calibration mode (DIAG) */
 #endif
+#include "sampling_tafter.h" /* SAMPLING_TAFTER_RUNTIME, Tafter get/set (CHANGE 7(a)) */
+
+#define CAN_PARAM_TAFTER 1u /* SET_PARAM param id */
 
 /* B4: TELEM Iq = mean of every 16 kHz sample since the previous TELEM
    (IqTelem_GetMeanAndReset, raw s16A, scaled to Amps). 0 = the old raw
@@ -61,6 +64,10 @@ typedef struct {
   volatile bool mode_pending;
   volatile uint8_t mode;
   volatile uint8_t mode_flags;
+  volatile bool param_pending; /* SET_PARAM, CHANGE 7(a) */
+  volatile uint8_t param_id;
+  volatile int32_t param_value;
+  volatile uint32_t param_bad_len; /* Rx-interrupt-only: wrong-length SET_PARAM */
 } CAN_CmdState_t;
 
 static volatile CAN_CmdState_t s_cmd = {0};
@@ -91,11 +98,16 @@ static uint32_t s_peerSeq = 0u; /* Rx-interrupt-only */
  * to expose it. */
 static volatile uint32_t s_telemTxDropCount = 0;
 static volatile uint32_t s_dbgTxDropCount = 0;
-static volatile uint32_t s_diagTxDropCount = 0; /* CALIB + DIAG */
+static volatile uint32_t s_diagTxDropCount = 0; /* CALIB + DIAG (+ DIAG2) */
+static uint32_t s_paramRejectCount = 0; /* hook-only: unknown id / out of range */
 
 uint32_t CAN_GetTelemTxDropCount(void) { return s_telemTxDropCount; }
 uint32_t CAN_GetDbgTxDropCount(void) { return s_dbgTxDropCount; }
 uint32_t CAN_GetDiagTxDropCount(void) { return s_diagTxDropCount; }
+/* Two counters, each with a single writer, so neither needs a lock. */
+uint32_t CAN_GetSetParamRejectCount(void) {
+  return s_paramRejectCount + s_cmd.param_bad_len;
+}
 
 /* ---- Microsecond timebase ----
  *
@@ -214,14 +226,19 @@ void CAN_Driver_Init(FDCAN_HandleTypeDef* hfdcan) {
     }
   }
 
-  /* Filter 0: this node's commands, START..COUPLE_MODE inclusive. */
+  /* Filter 0: this node's commands, START..COUPLE_MODE inclusive (..SET_PARAM
+     with SAMPLING_TAFTER_RUNTIME). */
   FDCAN_FilterTypeDef filt = {0};
   filt.IdType = FDCAN_STANDARD_ID;
   filt.FilterIndex = 0;
   filt.FilterType = FDCAN_FILTER_RANGE;
   filt.FilterConfig = FDCAN_FILTER_TO_RXFIFO0;
   filt.FilterID1 = CAN_ID_START(CAN_NODE_BASE);
+#if SAMPLING_TAFTER_RUNTIME
+  filt.FilterID2 = CAN_ID_SET_PARAM(CAN_NODE_BASE);
+#else
   filt.FilterID2 = CAN_ID_COUPLE_MODE(CAN_NODE_BASE);
+#endif
   HAL_StatusTypeDef st1 = HAL_FDCAN_ConfigFilter(s_hfdcan, &filt);
 
   /* Filter 1: exactly the peer's TELEM. Nothing else the peer sends --
@@ -328,6 +345,21 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef* hfdcan,
             (rxHeader.DataLength >= FDCAN_DLC_BYTES_2) ? rxData[1] : 0u;
         s_cmd.mode_pending = true;
         break;
+#if SAMPLING_TAFTER_RUNTIME
+      case CAN_ID_SET_PARAM(CAN_NODE_BASE): {
+        if (rxHeader.DataLength != FDCAN_DLC_BYTES_5) {
+          s_cmd.param_bad_len++;
+          break;
+        }
+        int32_t value;
+        memcpy(&value, &rxData[1], sizeof(int32_t)); /* LE, per the protocol */
+        s_cmd.param_pending = false;
+        s_cmd.param_id = rxData[0];
+        s_cmd.param_value = value;
+        s_cmd.param_pending = true;
+        break;
+      }
+#endif
       case CAN_ID_TELEM(CAN_PEER_BASE): {
         if (rxHeader.DataLength != FDCAN_DLC_BYTES_8) break;
         uint32_t const w = s_peerIdx ^ 1u;
@@ -364,6 +396,19 @@ bool CAN_GetPeerSample(const CAN_TickSample_t* now, CAN_PeerSample_t* out) {
   return true;
 }
 
+#if SAMPLING_TAFTER_RUNTIME
+/* CHANGE 7(a). Param 1 = Tafter; Sampling_SetTafter() also re-derives the
+   circle limitation from it (sampling_tafter.c). */
+static void ApplySetParam(uint8_t id, int32_t value) {
+  if ((id == CAN_PARAM_TAFTER) && (value >= (int32_t)SAMPLING_TAFTER_MIN) &&
+      (value <= (int32_t)SAMPLING_TAFTER_MAX)) {
+    Sampling_SetTafter((uint16_t)value);
+  } else {
+    s_paramRejectCount++;
+  }
+}
+#endif /* SAMPLING_TAFTER_RUNTIME */
+
 /* Called from MC_APP_PostMediumFrequencyHook_M1, NOT from ISR context.
  * Order matters only at the end: STOP is applied last so that it wins over
  * anything else that arrived in the same millisecond. */
@@ -393,6 +438,14 @@ void CAN_ProcessPendingMessages(void) {
     s_cmd.mode_pending = false;
     Couple_RequestMode(mode, flags);
   }
+#if SAMPLING_TAFTER_RUNTIME
+  if (s_cmd.param_pending) {
+    uint8_t const id = s_cmd.param_id;
+    int32_t const value = s_cmd.param_value;
+    s_cmd.param_pending = false;
+    ApplySetParam(id, value); /* in any state -- see SetTafter() */
+  }
+#endif
   if (s_cmd.iq_pending) {
     float const iq = s_cmd.iq_value;
     s_cmd.iq_pending = false;
@@ -548,6 +601,14 @@ static void SendDiag(void) {
   if (OffsetCalib_LastUsedSwitching()) {
     flags |= CAN_DIAG_FLAG_CALIB_SWITCHED;
   }
+  /* bit6: any SET_PARAM rejected since the previous DIAG. No byte is free
+     for the count itself; it is readable with CAN_GetSetParamRejectCount(). */
+  static uint32_t lastRejects = 0u;
+  uint32_t const rejects = CAN_GetSetParamRejectCount();
+  if (rejects != lastRejects) {
+    flags |= CAN_DIAG_FLAG_PARAM_REJECTED;
+    lastRejects = rejects;
+  }
   int16_t const ntc_c = NTC_GetAvTemp_C(&TempSensor_M1);
 
   uint8_t payload[8];
@@ -563,6 +624,27 @@ static void SendDiag(void) {
     s_diagTxDropCount++;
   }
 }
+
+#if CAN_DIAG2_FRAME
+/* CHANGE 7(c) -- layout in can_driver.h. */
+static void SendDiag2(void) {
+  CAN_Diag2Sample_t d;
+  Diag2_GetAndReset(&d);
+  uint16_t const tafter = Sampling_GetTafter();
+
+  uint8_t payload[8];
+  memcpy(&payload[0], &d.vq_req, sizeof(int16_t));
+  memcpy(&payload[2], &d.circle_cnt, sizeof(uint16_t));
+  memcpy(&payload[4], &d.nonforced_cnt, sizeof(uint16_t));
+  memcpy(&payload[6], &tafter, sizeof(uint16_t));
+
+  FDCAN_TxHeaderTypeDef hdr;
+  FillTxHeader(&hdr, CAN_ID_DIAG2(CAN_NODE_BASE));
+  if (HAL_FDCAN_AddMessageToTxFifoQ(s_hfdcan, &hdr, payload) != HAL_OK) {
+    s_diagTxDropCount++;
+  }
+}
+#endif
 #endif /* CAN_DIAG_FRAMES */
 
 /* The scheduler starts running this hook inside MX_MotorControl_Init(),
@@ -587,6 +669,11 @@ void CAN_ControlTick(void) {
   } else if (diagSlot == (CAN_DIAG_DIVIDER / 2u)) {
     SendDiag();
   }
+#if CAN_DIAG2_FRAME
+  else if (diagSlot == (CAN_DIAG_DIVIDER / 4u)) {
+    SendDiag2();
+  }
+#endif
   if (++diagSlot >= CAN_DIAG_DIVIDER) {
     diagSlot = 0u;
   }

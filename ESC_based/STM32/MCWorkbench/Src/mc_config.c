@@ -27,7 +27,7 @@
 #include "pqd_motor_power_measurement.h"
 
 /* USER CODE BEGIN Additional include */
-
+#include "sampling_tafter.h" /* CHANGE 7(a): Sampling_SetADCSampPointSectX */
 /* USER CODE END Additional include */
 
 #define FREQ_RATIO 1                /* Dummy value for single drive */
@@ -125,7 +125,13 @@ PWMC_R3_2_Handle_t PWM_Handle_M1 =
   ._Super =
   {
     .pFctGetPhaseCurrents       = &R3_2_GetPhaseCurrents,
+#if SAMPLING_TAFTER_RUNTIME
+    /* HAND EDIT (CHANGE 7(a), FIRMWARE_CHANGES.txt): MCSDK sampling with a
+       runtime Tafter -- STM32CubeIDE/Application/User/sampling_tafter.c */
+    .pFctSetADCSampPointSectX   = &Sampling_SetADCSampPointSectX,
+#else
     .pFctSetADCSampPointSectX   = &R3_2_SetADCSampPointSectX,
+#endif
     .pFctSetOffsetCalib         = &R3_2_SetOffsetCalib,
     .pFctGetOffsetCalib         = &R3_2_GetOffsetCalib,
     .pFctSwitchOffPwm           = &R3_2_SwitchOffPWM,

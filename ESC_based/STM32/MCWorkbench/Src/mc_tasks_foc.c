@@ -125,10 +125,26 @@ static volatile uint32_t s_iqTelemAccumCnt = 0u;
  * is read by the control loop. Vqd is packed into one word so the 1 kHz
  * reader can never pair a q from one cycle with a d from another. */
 #include "can_driver.h" /* CAN_DIAG_FLAG_*, CAN_DiagSample_t */
+#include "sampling_tafter.h" /* CHANGE 7(a): the sampling callback and Tafter in use */
+
+#if SAMPLING_TAFTER_RUNTIME
+#define DIAG_SAMPLING_CB (&Sampling_SetADCSampPointSectX)
+#else
+#define DIAG_SAMPLING_CB (&R3_2_SetADCSampPointSectX)
+#endif
 
 static volatile uint32_t s_diagVqd    = 0u; /* Vqd.q in bits 0..15, Vqd.d in 16..31 */
 static volatile uint8_t  s_diagSector = 0u;
 static volatile uint8_t  s_diagFlags  = 0u; /* CAN_DIAG_FLAG_* bits 0, 1, 3, 4 */
+
+#if CAN_DIAG2_FRAME
+/* CHANGE 7(c): DIAG2. s_diagVqReq is the Iq PI output BEFORE circle
+   limitation, stored by the one-line hand edit in FOC_CurrControllerM1().
+   The counts are RUN periods since the previous DIAG2, saturating. */
+static volatile int16_t  s_diagVqReq        = 0;
+static volatile uint16_t s_diag2CircleCnt   = 0u;
+static volatile uint16_t s_diag2NonForcedCnt = 0u;
+#endif
 
 /* USER CODE END Private Variables */
 
@@ -202,42 +218,83 @@ void Diag_UpdateHF(void)
   s_diagVqd = (uint32_t)(uint16_t)v.q | ((uint32_t)(uint16_t)v.d << 16);
 
   PWMC_R3_2_Handle_t const *const h = &PWM_Handle_M1;
-  if (h->_Super.PWMState &&
-      (h->_Super.pFctSetADCSampPointSectX == &R3_2_SetADCSampPointSectX))
-  {
-    uint8_t const sector = h->_Super.Sector;
-    /* bit0 is a snapshot of this period; the others are sticky. */
-    uint8_t f = s_diagFlags & (uint8_t)~CAN_DIAG_FLAG_SECTOR5_FORCED;
+  bool const sampling = h->_Super.PWMState &&
+      (h->_Super.pFctSetADCSampPointSectX == DIAG_SAMPLING_CB);
+  /* CHANGE 7(b): PWM-on periods outside RUN (encoder ALIGNMENT on the first
+     START after reset) no longer reach the flags. */
+  bool const run = (RUN == Mci[M1].State);
+#if DIAG_FLAGS_RUN_ONLY
+  bool const flagsOn = sampling && run;
+#else
+  bool const flagsOn = sampling;
+#endif
 
-    /* The exact test R3_2_SetADCSampPointSectX() just made. */
-    if ((uint16_t)(h->Half_PWMPeriod - h->_Super.lowDuty) > h->pParams_str->Tafter)
-    {
-      f |= CAN_DIAG_FLAG_SECTOR5_FORCED;
-    }
-    else
-    {
-      f |= CAN_DIAG_FLAG_NONFORCED_SEEN;
-    }
-    if ((SECTOR_2 == sector) || (SECTOR_3 == sector))
-    {
-      f |= CAN_DIAG_FLAG_CH18_SEEN;
-    }
+  if (sampling)
+  {
+    /* The exact test the sampling callback just made. */
+    bool const forced =
+        (uint16_t)(h->Half_PWMPeriod - h->_Super.lowDuty) > Sampling_GetTafter();
 
     /* Circle_Limitation() puts a limited vector on the circle, short only by
        its integer square-root truncation, so |Vqd|^2 >= M^2 - 2M catches
        every limited period (and only vectors within ~1 LSB of the circle
-       otherwise). Avoids editing the generated FOC_CurrControllerM1(). */
+       otherwise). */
     int32_t const m = (int32_t)CircleLimitationM1.MaxModule;
     int32_t const sq = ((int32_t)v.q * v.q) + ((int32_t)v.d * v.d);
-    if (sq >= ((m * m) - (2 * m)))
+    bool const limited = (sq >= ((m * m) - (2 * m)));
+
+    if (flagsOn)
     {
-      f |= CAN_DIAG_FLAG_CIRCLE_SEEN;
+      uint8_t const sector = h->_Super.Sector;
+      /* bit0 is a snapshot of this period; the others are sticky. */
+      uint8_t f = s_diagFlags & (uint8_t)~CAN_DIAG_FLAG_SECTOR5_FORCED;
+      f |= forced ? CAN_DIAG_FLAG_SECTOR5_FORCED : CAN_DIAG_FLAG_NONFORCED_SEEN;
+      if ((SECTOR_2 == sector) || (SECTOR_3 == sector))
+      {
+        f |= CAN_DIAG_FLAG_CH18_SEEN;
+      }
+      if (limited)
+      {
+        f |= CAN_DIAG_FLAG_CIRCLE_SEEN;
+      }
+      s_diagSector = sector;
+      s_diagFlags = f;
     }
 
-    s_diagSector = sector;
-    s_diagFlags = f;
+#if CAN_DIAG2_FRAME
+    /* DIAG2 counts RUN periods only, whatever DIAG_FLAGS_RUN_ONLY says. */
+    if (run)
+    {
+      if (limited && (s_diag2CircleCnt < UINT16_MAX))
+      {
+        s_diag2CircleCnt++;
+      }
+      if (!forced && (s_diag2NonForcedCnt < UINT16_MAX))
+      {
+        s_diag2NonForcedCnt++;
+      }
+    }
+#endif
   }
 }
+
+#if CAN_DIAG2_FRAME
+/* Snapshot for the DIAG2 frame; clears the counts, so call it exactly once
+ * per DIAG2. */
+void Diag2_GetAndReset(CAN_Diag2Sample_t *out)
+{
+  uint32_t const primask = __get_PRIMASK();
+  __disable_irq();
+
+  out->vq_req = s_diagVqReq;
+  out->circle_cnt = s_diag2CircleCnt;
+  out->nonforced_cnt = s_diag2NonForcedCnt;
+  s_diag2CircleCnt = 0u;
+  s_diag2NonForcedCnt = 0u;
+
+  __set_PRIMASK(primask);
+}
+#endif
 
 /* Snapshot for the DIAG frame; clears the sticky flags, so it must be called
  * exactly once per DIAG. Holds the ISR off for a few cycles. */
@@ -806,6 +863,11 @@ inline uint16_t FOC_CurrControllerM1(void)
     Vqd.q = 0;
     Vqd.d = 0;
   }
+#if CAN_DIAG2_FRAME
+  /* HAND EDIT outside the USER CODE blocks (CHANGE 7(c), FIRMWARE_CHANGES.txt):
+     the Iq PI output before circle limitation, for the DIAG2 frame. */
+  s_diagVqReq = Vqd.q;
+#endif
   Vqd = Circle_Limitation(&CircleLimitationM1, Vqd);
   Valphabeta = MCM_Rev_Park(Vqd, hElAngle);
 

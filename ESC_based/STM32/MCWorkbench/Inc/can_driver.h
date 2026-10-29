@@ -47,6 +47,7 @@
 #define CAN_ID_COUPLE_GAINS(base) ((base) + 0x004)
 #define CAN_ID_COUPLE_LOCAL(base) ((base) + 0x005)
 #define CAN_ID_COUPLE_MODE(base) ((base) + 0x006)
+#define CAN_ID_SET_PARAM(base) ((base) + 0x007) /* CHANGE 7(a), SAMPLING_TAFTER_RUNTIME */
 #define CAN_ID_TELEM(base) ((base) + 0x012)
 
 /* DBG lives 0x100 above TELEM (0x112 for ESC 1, 0x132 for ESC 2), outside
@@ -62,6 +63,7 @@
  * arbitration. Not the retired 0x013/0x014 -- those stay unused. */
 #define CAN_ID_CALIB(base) (0x100 + (base) + 0x013)
 #define CAN_ID_DIAG(base) (0x100 + (base) + 0x014)
+#define CAN_ID_DIAG2(base) (0x100 + (base) + 0x015) /* CHANGE 7(c) */
 
 /* Standard-ID filter elements CAN_Driver_Init() configures: one range for
  * this node's commands, one exact match for the peer's TELEM. The FDCAN
@@ -85,6 +87,15 @@
  *                             2 peer. Sending a mode again re-zeroes it.
  *                             Optional uint8 flags: COUPLE_FLAG_* in
  *                             couple_ctrl.h (bit 0 = predict peer).
+ *   base+0x007 SET_PARAM      (CHANGE 7(a), SAMPLING_TAFTER_RUNTIME) DLC 5:
+ *                             uint8 param id, int32 value. Applied in any
+ *                             state within 1 ms. Param 1 = Tafter, the
+ *                             forced-SECTOR_5 / natural-path sampling delay
+ *                             in TIM1 counts (170 MHz), accepted 400..2040;
+ *                             CircleLimitationM1.MaxModule/MaxVd follow it
+ *                             (sampling_tafter.c). Wrong length,
+ *                             unknown id or out of range: ignored, counted
+ *                             (DIAG flags bit6). Readback: DIAG2 [6..7].
  *
  * TELEM payload, 8 bytes, little-endian -- everything the Pi reads, in one
  * frame per 1 kHz tick. The PEER ESC reads it too: bytes 4..7 are what
@@ -160,7 +171,19 @@
  *                   previous DIAG; bits 2, 5 are build/calibration state.
  *                   Bits 0, 1, 3, 4 are only updated in normal sampling with
  *                   the PWM on (not during offset calibration).
- *   [6..7] int16    board NTC temperature, deg C (NTC_GetAvTemp_C) */
+ *   [6..7] int16    board NTC temperature, deg C (NTC_GetAvTemp_C)
+ *   With DIAG_FLAGS_RUN_ONLY (CHANGE 7(b)) bits 0, 1, 3, 4 are only updated
+ *   in RUN. bit6 (CHANGE 7(a)): at least one SET_PARAM was rejected since
+ *   the previous DIAG (the full count is CAN_GetSetParamRejectCount()).
+ *
+ * DIAG2 payload (CHANGE 7(c), CAN_DIAG2_FRAME), 8 bytes, little-endian,
+ * 10 Hz on tick slot CAN_DIAG_DIVIDER/4; counts are RUN periods (16 kHz)
+ * since the previous DIAG2, saturating at 65535:
+ *   [0..1] int16    Vq requested by the Iq PI BEFORE circle limitation,
+ *                   last period
+ *   [2..3] uint16   periods with circle limitation active
+ *   [4..5] uint16   periods read through the natural (non-forced) path
+ *   [6..7] uint16   Tafter in use, TIM1 counts (SET_PARAM readback) */
 
 #define CAN_DBG_IDLE_DIVIDER 100u /* 10 Hz DBG while nothing is coupled */
 
@@ -177,6 +200,21 @@
 #define CAN_DIAG_FLAG_NONFORCED_SEEN 0x08u /* sticky: natural sector read  */
 #define CAN_DIAG_FLAG_CH18_SEEN      0x10u /* sticky: sectors 2-3 (ch18)   */
 #define CAN_DIAG_FLAG_CALIB_SWITCHED 0x20u /* last calibration switched    */
+#define CAN_DIAG_FLAG_PARAM_REJECTED 0x40u /* SET_PARAM rejected (7(a))    */
+
+/* CHANGE 7(b): 1 = DIAG flag bits 0, 1, 3, 4 only from RUN periods;
+   0 = any period with the PWM on and normal sampling (75a893b behaviour). */
+#ifndef DIAG_FLAGS_RUN_ONLY
+#define DIAG_FLAGS_RUN_ONLY 1
+#endif
+
+/* CHANGE 7(c): 1 = send DIAG2 (needs CAN_DIAG_FRAMES). */
+#ifndef CAN_DIAG2_FRAME
+#define CAN_DIAG2_FRAME 1
+#endif
+#if CAN_DIAG2_FRAME && !CAN_DIAG_FRAMES
+#error "CAN_DIAG2_FRAME needs CAN_DIAG_FRAMES (it shares the HF snapshot)"
+#endif
 
 /* One sample of this node's encoder and clocks, taken together at the top
  * of the 1 kHz tick, so TELEM, DBG and the coupling law all describe the
@@ -217,7 +255,8 @@ bool CAN_GetPeerSample(const CAN_TickSample_t* now, CAN_PeerSample_t* out);
  * pattern if that's added later. */
 uint32_t CAN_GetTelemTxDropCount(void);
 uint32_t CAN_GetDbgTxDropCount(void);
-uint32_t CAN_GetDiagTxDropCount(void); /* CALIB + DIAG */
+uint32_t CAN_GetDiagTxDropCount(void); /* CALIB + DIAG (+ DIAG2) */
+uint32_t CAN_GetSetParamRejectCount(void); /* CHANGE 7(a) */
 
 /* ---- Iq telemetry conditioning ----
  * Defined in the USER CODE blocks of mc_tasks_foc.c, because that is where
@@ -243,5 +282,14 @@ typedef struct {
 
 void Diag_UpdateHF(void);
 void Diag_GetAndReset(CAN_DiagSample_t* out);
+
+/* DIAG2 snapshot (CHANGE 7(c)), same arrangement. */
+typedef struct {
+  int16_t vq_req;         /* Iq PI output before circle limitation */
+  uint16_t circle_cnt;    /* RUN periods with circle limitation active */
+  uint16_t nonforced_cnt; /* RUN periods read through the natural path */
+} CAN_Diag2Sample_t;
+
+void Diag2_GetAndReset(CAN_Diag2Sample_t* out);
 
 #endif /* CAN_DRIVER_H */
