@@ -38,6 +38,12 @@ ESC_based/STM32/MCWorkbench/Inc/can_driver.h):
                                [4] uint8 sector (0 = SECTOR_1)  [5] uint8 flags (DIAG_*)
                                [6..7] int16 board NTC, deg C
                              Both absent on firmware without CHANGE 4.
+    base+0x007 SET_PARAM     Pi->MCU  DLC 5: uint8 param id, int32 value (CHANGE 7);
+                             param 1 = Tafter in TIM1 counts, 400..2040
+    0x100+base+0x015 DIAG2   MCU->Pi  8 bytes LE, 10 Hz (CHANGE 7): int16 Vq before
+                             circle limitation, uint16 circle-limited RUN periods,
+                             uint16 non-forced RUN periods (both since the previous
+                             DIAG2, ~1600 periods), uint16 Tafter in use
 
 The TELEM layout is unchanged, so this module still works against the
 original firmware for everything except the coupling commands and DBG.
@@ -64,12 +70,15 @@ OFFSET_SET_IQ = 0x003
 OFFSET_COUPLE_GAINS = 0x004
 OFFSET_COUPLE_LOCAL = 0x005
 OFFSET_COUPLE_MODE = 0x006
+OFFSET_SET_PARAM = 0x007       # CHANGE 7: <B i> param id, int32 value
+PARAM_TAFTER = 1               # sampling delay, TIM1 counts, accepted 400..2040 (stock 807)
 OFFSET_TELEM = 0x012
 # DBG sits 0x100 above TELEM, outside every node's block, so it loses
 # arbitration to all control traffic -- see CAN_ID_DBG in can_driver.h.
 OFFSET_DBG = 0x100 + OFFSET_TELEM
 OFFSET_CALIB = 0x100 + 0x013    # CHANGE 4 diagnostics, outside the node block
 OFFSET_DIAG = 0x100 + 0x014
+OFFSET_DIAG2 = 0x100 + 0x015   # CHANGE 7: <hHHH> Vq pre-limit, circle count, non-forced count, Tafter
 # DIAG flags byte -- CAN_DIAG_FLAG_* in can_driver.h (firmware 75a893b)
 DIAG_SECTOR5_FORCED = 1 << 0     # snapshot, same period as the sector byte
 DIAG_CIRCLE_SEEN = 1 << 1        # sticky since the previous DIAG
@@ -77,6 +86,7 @@ DIAG_OFFSET_SW_BUILT = 1 << 2    # OFFSET_CALIB_SWITCHING built in
 DIAG_NONFORCED_SEEN = 1 << 3     # sticky: natural (non-forced) sector read used
 DIAG_CH18_SEEN = 1 << 4          # sticky: sectors 2-3 (phase C on ADC2 ch18) used
 DIAG_CALIB_SWITCHED = 1 << 5     # the last calibration actually switched
+DIAG_PARAM_REJECTED = 1 << 6     # a SET_PARAM was rejected since the previous DIAG
 
 COUPLE_MODE_OFF = 0
 COUPLE_MODE_HOLD = 1
@@ -268,7 +278,8 @@ class _SharedBus:
     def register(self, iface, channel, bustype):
         """Subscribe iface's telemetry IDs and make sure the RX thread runs."""
         with self._lock:
-            arb_ids = [iface._id_telem, iface._id_dbg, iface._id_calib, iface._id_diag]
+            arb_ids = [iface._id_telem, iface._id_dbg, iface._id_calib, iface._id_diag,
+                       iface._id_diag2]
 
             table = self._nodes.setdefault(channel, {})
             for arb_id in arb_ids:
@@ -383,6 +394,10 @@ class MotorCANInterface:
         self._id_dbg = node_base + OFFSET_DBG
         self._id_calib = node_base + OFFSET_CALIB
         self._id_diag = node_base + OFFSET_DIAG
+        self._id_diag2 = node_base + OFFSET_DIAG2
+        self._id_set_param = node_base + OFFSET_SET_PARAM
+        self.diag2 = None
+        self.diag2_history = collections.deque(maxlen=20000)
         # Latest CALIB / DIAG (CHANGE 4 firmware only), plus a bounded
         # history of DIAG for logging: (rx time, vq, vd, sector, flags, temp).
         self.calib = None
@@ -443,6 +458,15 @@ class MotorCANInterface:
     def send_stop(self):
         self._send(self._id_stop)
 
+    def send_set_param(self, param_id: int, value: int):
+        """CHANGE 7 SET_PARAM; the firmware ignores (and flags) bad ids/values."""
+        self._send(self._id_set_param, struct.pack("<Bi", int(param_id), int(value)))
+
+    def send_tafter(self, counts: int):
+        if not 400 <= counts <= 2040:
+            raise ValueError("Tafter must be 400..2040 counts (firmware bounds)")
+        self.send_set_param(PARAM_TAFTER, counts)
+
     def send_set_iq(self, amps: float):
         self._send(self._id_set_iq, struct.pack("<f", amps))
 
@@ -490,8 +514,16 @@ class MotorCANInterface:
                              "nonforced_seen": bool(flags & DIAG_NONFORCED_SEEN),
                              "ch18_seen": bool(flags & DIAG_CH18_SEEN),
                              "calib_switched": bool(flags & DIAG_CALIB_SWITCHED),
+                             "param_rejected": bool(flags & DIAG_PARAM_REJECTED),
                              "temp_c": temp, "time": now}
                 self.diag_history.append((now, vq, vd, sector, flags, temp))
+        elif msg.arbitration_id == self._id_diag2:
+            vq_pre, n_circle, n_nonforced, tafter = struct.unpack("<hHHH", msg.data)
+            now = time.time()
+            with self._lock:
+                self.diag2 = {"vq_pre": vq_pre, "n_circle": n_circle,
+                              "n_nonforced": n_nonforced, "tafter": tafter, "time": now}
+                self.diag2_history.append((now, vq_pre, n_circle, n_nonforced, tafter))
 
     def _handle_telem(self, msg):
         iq, enc_raw, mcu_us = struct.unpack("<fHH", msg.data)
@@ -573,13 +605,26 @@ class MotorCANInterface:
         firmware without CHANGE 4)."""
         with self._lock:
             return {"calib": dict(self.calib) if self.calib else None,
-                    "diag": dict(self.diag) if self.diag else None}
+                    "diag": dict(self.diag) if self.diag else None,
+                    "diag2": dict(self.diag2) if self.diag2 else None}
 
     def drain_diag_history(self) -> list:
         with self._lock:
             out = list(self.diag_history)
             self.diag_history.clear()
         return out
+
+    def save_diag2_history(self, path):
+        with self._lock:
+            rows = list(self.diag2_history)
+            self.diag2_history.clear()
+        if rows:
+            import csv
+            with open(path, "w", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(["rx_time", "vq_pre", "n_circle", "n_nonforced", "tafter"])
+                w.writerows(rows)
+        return len(rows)
 
     def save_diag_history(self, path):
         """Write (and clear) the DIAG history as CSV; returns the row count.

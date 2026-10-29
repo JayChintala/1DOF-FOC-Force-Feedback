@@ -4371,6 +4371,47 @@ Levels 0.05–0.45 A: within 1 % everywhere.
 
 ---
 
+## 2026-10-28: CHANGE 7 implemented (b26c643, not flashed yet); Pi side matched
+
+**Dev Phase 1 decisions** (approved):
+
+- MaxModule is coupled to Tafter: 89 % at 807, about 85 % at 1360,
+  about 70.5 % at 2040.
+- SET_PARAM base+0x007, `<Bi>`, param 1 = Tafter 400..2040.
+- DIAG2 0x100+base+0x015, `<hHHH>`.
+- RUN-only flag gate.
+- **Sector clarification:** at the bad angle the raw sector bytes were
+  4 (SECTOR_5) forced, and natural 4 (0.6 A) / 3 = SECTOR_4 (0.8 A). So
+  the highest-duty leg is C and A+B are read. That fits the dev's
+  "C-edge coupling into the A/B samples" scenario. Either way, the
+  Tafter sweep tests it.
+- **DIAG flag "bugs":** no logic error found. The sticky bits catch real
+  single-period spikes (needing about 0.8 A of sample error even at
+  0.05 A). The DIAG2 counters will quantify them. Only the ALIGNMENT gap
+  was fixed.
+
+**Phase 2** (b26c643, rebased on 8aaea00):
+
+- `R3_2_Params_t` is const by type, so the sampling routine is a copy in
+  `sampling_tafter.c` reading a RAM Tafter. It is installed by a marked
+  hand edit at `mc_config.c:128`.
+- DIAG flags bit6 = SET_PARAM rejected.
+- **Images:**
+  - ESC1 `Debug/ESC_based.elf`: sha256 ca033b28…2bc2.
+  - ESC2 `Debug_ESC2/ESC_based.elf`: sha256 4da7d15f…14fb.
+- Both builds: 0 warnings; each switch also builds when set to 0.
+
+**Pi:**
+
+- `can_interface.py`: `send_set_param` / `send_tafter`, DIAG2 parse
+  (`get_diag()["diag2"]`, `save_diag2_history`), bit6.
+- New `tafter_sweep.py`: one START. For each Tafter, SET_PARAM →
+  confirm via DIAG2 → stall levels (0.3 / 0.45 / 0.6 / 0.8 A, 4 s each).
+  Stock Tafter is restored before STOP. It prints measured vs command
+  plus the DIAG2 counts.
+
+---
+
 ## Phase A summary (2026-10-20)
 
 | Step | Result | Key number |
