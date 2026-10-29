@@ -4264,6 +4264,111 @@ Levels 0.05–0.45 A: within 1 % everywhere.
    say?
 4. `cal_repeat` cold, then warm: has the 7/rev growth gone?
 
+**ESC supply (user, 2026-10-28): 12 V.**
+
+- The dev estimate at 12 V with Rs 5.29 Ω (cold): forced SECTOR_5 ends
+  at about 0.88–1.02 A of stall current.
+- The observed breakdown onset is about 0.55 A at bad angles. That
+  implies an effective Rs about 1.6–1.8× nominal, or a mechanism other
+  than the read-path switch (inferred).
+- DIAG bits 3/4 (non-forced / ch18 path seen) will show directly
+  whether the path switches at about 0.55 A.
+
+---
+
+## 2026-10-28: Firmware 75a893b flashed (CHANGES 3–6) — first checks; current breakdown persists, traced to forced A+B sampling at high duty
+
+**Bus:**
+
+- Both boards at TELEM 1000/s.
+- CALIB/DIAG at 10/s on the correct IDs (A 0x113/0x114, B 0x133/0x134),
+  so the images are not swapped.
+- Idle NTC: **follower 18 °C, leader 34 °C.**
+
+**`zero_iq_check` PASS:**
+
+- run0 −0.0002 / +0.0000 A.
+- DIAG flags 0x24 on both boards: switching calibration built in and
+  **used** (no fallback).
+- Offsets (left-aligned units; 544 counts per amp = 1.84 mA per count):
+
+| Board | offA | offB | offC ch12 | offC ch18 | ch18 − ch12 |
+|---|---|---|---|---|---|
+| Follower | 40296 | 40392 | 40589 | 40665 | **+76 (≈ 140 mA)** |
+| Leader | 40395 | 40503 | 40593 | 40655 | **+62 (≈ 114 mA)** |
+
+- So the old firmware's ch12-for-ch18 offset was wrong by 110–140 mA on
+  phase C in sectors 2–3. It is now calibrated separately.
+
+**Stall steps at a bad angle** (electrical 70°, raw 70–124, hand-held):
+`logs/STALL_fw6_bad_2026-10-28{.csv,_diag.csv}`.
+
+| Command | Measured mean (std) | Vq % of full | SECTOR_5 forced (snapshot) | Sectors |
+|---|---|---|---|---|
+| 0.30 | 0.296 (15 mA) | 21 % | 100 % | 5 |
+| 0.45 | 0.443 (18 mA) | 29 % | 100 % | 5 |
+| **0.60** | **0.581 (52 mA)** | **55 %** | 71 % | 5 |
+| **0.80** | **0.683 (111 mA)** | **70 %** | 56 % | 4, 5 |
+
+**Findings:**
+
+- **The breakdown persists** with the ch18 offset fixed. At 0.6 A the
+  read is still mostly forced A+B, so the ch18 path is not the cause.
+- **Vq jumps** 29 % → 55 % from 0.45 to 0.6 A (R·I would give about
+  39 %). The PI is over-driving against a low reading.
+- **Inferred:** the dev session's sampling-window hypothesis. Forced A+B
+  sampling at mid-period leaves less settle time after the
+  highest-duty phase's low-side turn-on as duty rises. It is
+  angle-dependent, because the error appears only when that phase is A
+  or B. That fits 258° being clean.
+- **Candidate CHANGE 7:** raise Tafter (the settle/rise allowance,
+  currently 750 + 4000 ns = 807 counts) so forced SECTOR_5 ends earlier
+  and the natural sector, now with the calibrated ch18 offset, is used.
+  Or move the sample point.
+
+**DIAG flag bugs to report:**
+
+- bit1 "circle limit seen" is set 96–100 % even at 0.05 A (Vq 6 % of
+  full).
+- bit3 "non-forced seen" is 100 % at all levels while the bit0 snapshot
+  is 100 % forced.
+- bit4 "ch18 seen" is 52 % at 0.05 A, falling to 0 % at 0.45 A.
+  Suspicious.
+
+**`cal_repeat` on the new firmware** (`--n 3 --wait 60`;
+`logs/cal_repeat_20261028_215551{.json,_1..3.csv,_diagA.csv,_diagB.csv}`):
+
+| Term | t = 0 s | t = 89 s | t = 178 s |
+|---|---|---|---|
+| 7/rev | 11.0 mA @ −20° | **55.1 @ −34°** | 51.4 @ −34° |
+| 12/rev | 33.1 | 31.2 | 35.8 |
+| 28/rev | 13.5 | 13.7 | 13.4 |
+
+- NTC over 208 s: **leader 34 → 40 °C, follower 18 → 24 °C.**
+- **The switching calibration does NOT stop the 7/rev growth.** The
+  "offset present only while switching" hypothesis is ruled out (the
+  calibration now runs switching at 50 %).
+- **Remaining explanation (inferred):** a thermal offset drift *after*
+  calibration. The board heats about 6 °C in 3.5 min in RUN at 0 A, and
+  the 7/rev settles as the temperature settles.
+- **Measurable now:** repeated START/STOP through a warm-up, reading
+  CALIB offsets against the NTC, gives the per-phase offset temperature
+  coefficient. A firmware NTC-based offset correction would follow.
+  Parked (user: secondary).
+- **Proposed next:** CHANGE 7 (Tafter / sampling timing for the
+  breakdown, DIAG flag fixes), pending the user.
+
+**CHANGE 7 written** (user: yes) in `FIRMWARE_CHANGES.txt`, two-phase:
+
+- (a) Tafter adjustable, preferably at runtime via a new SET_PARAM CAN
+  command (base+0x007), so one session can sweep 807 / about 1360 /
+  about 2040 counts.
+- (b) Fix DIAG bits 1/3/4.
+- (c) Optionally, pre-limitation Vq.
+- (d) Note only: offset temperature compensation for the 7/rev drift.
+- **Pi pass criterion:** measured Iq within 2 % of command up to 0.8 A,
+  std ≤ 25 mA, at a bad angle.
+
 ---
 
 ## Phase A summary (2026-10-20)

@@ -9,6 +9,10 @@ friction measurements" entries explain why).
 INSTRUCTIONS FOR THE CLAUDE CODE SESSION
 ===========================================================================
 
+UPDATE 2026-10-28 (Pi, later): 75a893b (CHANGES 3-6) IS FLASHED on both
+boards and verified on the bus (CALIB/DIAG present, switching calibration
+used). NEXT ROUND = CHANGE 7 (below), same two-phase process.
+
 UPDATE 2026-10-28 (Pi): CHANGES 3-6 are IMPLEMENTED and pushed by the dev
 session (856a6bb = CHANGES 1-2 rebased, 75a893b = CHANGES 3-6; both builds
 0 warnings). NOT YET FLASHED at the time of writing. Deviation from the
@@ -351,6 +355,89 @@ Restore DAC_OCP_Threshold to the value that gives the original physical
 trip current (the pre-16x value, or recompute from the shunt and the
 comparator input network). Report the old value, the new value and the
 resulting physical trip current in amps before changing it.
+
+===========================================================================
+CHANGE 7 (NEXT ROUND -- approved by the user 2026-10-28; TWO PHASES as before:
+report the design first, implement after approval, flash only when told)
+Sampling timing for the measured-Iq breakdown above ~0.5 A, plus DIAG fixes
+===========================================================================
+
+WHY (Pi measurements on firmware 75a893b, TEST_LOG 2026-10-28)
+Hand-held stall steps at a "bad" rotor angle (electrical ~70 deg), with the
+new DIAG frame:
+
+  cmd     measured Iq mean (std)   Vq % of full   SECTOR_5 forced (snapshot)
+  0.30 A  0.296 (15 mA)            21 %           100 %
+  0.45 A  0.443 (18 mA)            29 %           100 %
+  0.60 A  0.581 (52 mA)            55 %            71 %
+  0.80 A  0.683 (111 mA)           70 %            56 %  (sectors 4, 5)
+
+- The ch18 phase-C offset is now calibrated separately (CALIB shows it
+  was 62-76 counts = 114-140 mA off), yet the breakdown is unchanged, and
+  at 0.6 A the read is still mostly forced A+B (no ch18). So the ch18
+  path is not the cause.
+- Vq jumps 29 -> 55 % between 0.45 and 0.6 A (R*I alone: ~39 %): the PI
+  over-drives against a measurement that reads low; scale data earlier
+  showed the real current overshoots the command (~0.93 A at 0.8 A).
+- The breakdown is angle-dependent (onset ~0.55 A at 42-70 deg, ~0.8 A at
+  144/323 deg, none to 0.8 A at 258 deg).
+- This matches the dev review's sampling-window hypothesis [inferred]: in
+  forced SECTOR_5 the A and B samples are taken at Half_PWMPeriod - 1,
+  and the time from the highest-duty leg's low-side turn-on to the
+  sample shrinks as duty rises (~10 us at 0.45 A, ~7-8 us at 0.68 A real);
+  if the sense front end needs longer to settle, the sample reads low.
+  It only bites when that highest-duty leg is A or B (sampled), hence the
+  angle dependence. The forced-mode test uses Tafter = (750 + 4000 ns) x
+  0.17 = 807 counts (parameters_conversion.h:137-140), i.e. it assumes
+  ~4.75 us is enough.
+
+WHAT (design to report first)
+(a) Make the forced-SECTOR_5 threshold Tafter adjustable WITHOUT
+    regenerating: preferably at RUNTIME via a new Pi->MCU CAN command
+    (proposed: base+0x007 SET_PARAM, uint8 param id + int32/float value;
+    param 1 = Tafter in timer counts, accepted only within e.g. 400..3000
+    counts, applied in IDLE or atomically per PWM period -- report which
+    is safe), so the Pi can sweep it in one session (stock 807, then e.g.
+    ~1360 = 8 us, ~2040 = 12 us) without reflashing. Report whether
+    pParams_str->Tafter is const/in flash and what it takes to make it a
+    RAM variable used by R3_2_SetADCSampPointSectX (r3_2.c:1134) and any
+    other user of Tafter/Tbefore. If a runtime parameter is not
+    reasonable, fall back to a compile-time #define SAMPLING_TAFTER_NS
+    and report the build matrix.
+    Also report: with forced mode ending earlier, which phases does the
+    natural-sector path sample (it should be the two lowest-duty legs,
+    i.e. longest windows), and is anything else in that path suspect now
+    that the ch18 offset is calibrated?
+(b) Fix the DIAG flag bits (from Pi data on 75a893b):
+    - bit1 "circle limit seen" is set 96-100 % of DIAG frames even at
+      0.05 A with Vq ~6 % of full -- impossible; check the |Vqd|^2 test
+      (overflow? computed on the wrong variable or including the
+      calibration / IDLE periods?).
+    - bit3 "non-forced seen" is 100 % at every level while the bit0
+      snapshot shows forced 100 %; bit4 "ch18 seen" is 52 % at 0.05 A,
+      falling to 0 % at 0.45 A. Check when the sticky bits are set
+      (e.g. periods where PWM is on but outside RUN, or the test
+      inverted) and fix so they reflect RUN sampling only.
+(c) Report the Vq value the PI requests vs the circle-limited Vq (if the
+    DIAG Vq is post-limitation, add the pre-limitation value to the spare
+    bits or a 3rd frame only if cheap -- optional).
+(d) NOT this round, note only: the leader's 7/rev ripple (an Iq error at
+    the electrical frequency) still grows in RUN with the switching
+    calibration (11 -> 55 mA in 89 s, NTC 34 -> 40 C), so it is most
+    likely offset drift with board temperature AFTER calibration. A later
+    change could apply offset(T) = offset_cal + k_phase * (NTC - NTC_cal),
+    with k measured on the Pi from repeated START/STOP CALIB readbacks.
+Same hard rules: hand edits only, never regenerate; compile-time switch
+for each part; both builds warning-free; report diff, build result and
+image checksums; commit and push after a clean build; do not flash until
+the user says so. Report any SET_PARAM layout change so the Pi side
+matches.
+
+VERIFY ON THE PI
+Stall steps at a bad angle (~70 deg electrical) for each Tafter value,
+with DIAG: pass = measured Iq within 2 % of command up to 0.8 A with std
+<= 25 mA, Vq roughly proportional to current, SECTOR_5 forced ending
+earlier; then the scale check (force linear to 0.8 A at ~1.044 N/A).
 
 ===========================================================================
 NOT INCLUDED (decided by the user)
