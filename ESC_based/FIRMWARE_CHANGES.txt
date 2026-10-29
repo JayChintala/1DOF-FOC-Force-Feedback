@@ -9,10 +9,20 @@ friction measurements" entries explain why).
 INSTRUCTIONS FOR THE CLAUDE CODE SESSION
 ===========================================================================
 
-STATUS: CHANGES 1 and 2 are ALREADY APPLIED and flashed (2026-10-25). CHANGE 3
-was flashed 2026-10-26 (dev review confirmed /128 in the ELF); it did NOT
-remove the 7/rev ripple (systematic, see TEST_LOG) but is kept. Check
-they are present (do not apply them twice), then make ONLY CHANGE 3.
+STATUS (2026-10-28): CHANGES 1-3 are ALREADY APPLIED and flashed (1-2 on
+2026-10-25, 3 on 2026-10-26; the CHANGE 3 edit is still uncommitted on the
+dev machine). Check they are present -- do not apply them twice.
+
+THIS ROUND: CHANGES 4, 5 and 6, in TWO PHASES:
+  PHASE 1 (read-only): for CHANGE 5 and CHANGE 6, answer every "CHECK AND
+    REPORT FIRST" item and propose the exact design/diff (including any
+    MCSDK __weak overrides placed in user code). For CHANGE 4, confirm the
+    frame layouts below fit the TX FIFO budget. Then STOP and report to
+    the user. Do not edit yet.
+  PHASE 2 (after the user approves the report): implement 4, 5 and 6, each
+    behind its compile-time switch, build both ESC configurations
+    warning-free for the edited files, report the diff + build result, and
+    flash only when the user says so.
 Do not change anything else.
 
 HARD RULES
@@ -197,8 +207,8 @@ Offset calibration at START takes 8x longer: roughly 2 x 128 PWM periods at
 nothing on the Pi changes.
 
 ===========================================================================
-CHANGE 4 (FUTURE -- DO NOT APPLY YET; logged 2026-10-26 at the user's request)
-Diagnostic CAN frame: calibrated phase offsets + board temperature, 10 Hz
+CHANGE 4 (APPLY THIS ROUND -- see STATUS; logged 2026-10-26, frames fixed 2026-10-28)
+Diagnostic CAN frames: CALIB (phase offsets) + DIAG (Vqd, sector, flags, NTC), 10 Hz
 ===========================================================================
 
 WHY
@@ -209,7 +219,9 @@ Reading the offsets and the board NTC back per START, and checking whether
 the ripple tracks temperature, separates the two candidate causes: (a) an
 offset that exists only while the FETs conduct (calibration cannot see it),
 or (b) a thermal offset drift after calibration. The Pi currently works
-around the ripple with an adaptive canceller; this change is for root cause.
+around the ripple with an in-session calibration sweep; this change is for
+root cause. The DIAG frame also diagnoses the measured-Iq breakdown above
+~0.5 A (angle-dependent, TEST_LOG 2026-10-28).
 
 WHAT (as described by the dev-session review, 2026-10-26; verify before use)
 - Offsets: MC_GetPolarizationOffsetsMotor1(PolarizationOffsets_t*)
@@ -218,25 +230,35 @@ WHAT (as described by the dev-session review, 2026-10-26; verify before use)
   in uint16.
 - Temperature: NTC_GetAvTemp_C(&TempSensor_M1) (ntc_temperature_sensor.c:197),
   int16 deg C, board NTC, updated in the safety task.
-- Frame: 8 bytes [0..1] u16 offA, [2..3] u16 offB, [4..5] u16 offC,
-  [6..7] i16 deg C, little-endian like TELEM. ID 0x100 + base + 0x013
-  (0x113 / 0x133), outside the node block like DBG; transmit-only.
-- ADDED 2026-10-28 (current-measurement breakdown above ~0.5 A, TEST_LOG):
-  a second diagnostic frame at 10 Hz (or a faster rate if the TX FIFO
-  allows; report what is safe) with FOCVars[M1].Vqd.q and .d (int16 each),
-  the PWMC _Super.Sector after the sample-point setup (uint8), and a flag
-  for "SECTOR_5 forced this period" (uint8); remaining 2 bytes: the max
-  |Vqd| since the last frame (int16). ID e.g. 0x100 + base + 0x014. The dev
-  review called Vqd.q "the most useful single measurement": a lasting
-  measured-Iq shortfall means the Iq PI output is hitting a limit.
-- Send: a SendCalib() from CAN_ControlTick (can_driver.c:514) every 100th
-  tick. TX FIFO has 3 elements; TELEM + DBG use 2 per tick, so count drops
-  the same way as s_telemTxDropCount.
+- FRAME LAYOUTS (fixed 2026-10-28; the Pi parser follows these exactly;
+  little-endian like TELEM; transmit-only; outside the 0x20 node block like
+  DBG; if a layout must change, report it so the Pi side matches):
+  CALIB  ID 0x100 + base + 0x013  (0x113 / 0x133), 10 Hz
+    [0..1] u16 offA       [2..3] u16 offB
+    [4..5] u16 offC_ch12  [6..7] u16 offC_ch18 (0 when CHANGE 5 is off)
+    Raw offsets as used in R3_2_GetPhaseCurrents (left-aligned ADC units).
+  DIAG   ID 0x100 + base + 0x014  (0x114 / 0x134), 10 Hz (faster only if
+         the TX budget allows; report the rate)
+    [0..1] i16 Vqd.q (FOCVars[M1].Vqd.q, after circle limitation)
+    [2..3] i16 Vqd.d
+    [4]    u8  PWMC _Super.Sector after the sample-point setup
+    [5]    u8  flags: bit0 = SECTOR_5 forced this period,
+                      bit1 = circle limitation active this period,
+                      bit2 = OFFSET_CALIB_SWITCHING (CHANGE 5) built in
+    [6..7] i16 board NTC temperature, deg C (NTC_GetAvTemp_C)
+  DIAG was added 2026-10-28 for the measured-Iq breakdown above ~0.5 A:
+  the dev review called Vqd.q "the most useful single measurement" (a
+  lasting shortfall means the Iq PI output hits a limit).
+  The two frames can go out on alternate CAN_ControlTick slots (e.g. tick
+  % 100 == 0 and == 50) to spread the TX load.
+- Send: from CAN_ControlTick (can_driver.c:514), see slots above. The TX
+  FIFO has 3 elements and TELEM + DBG use 2 per tick, so count drops the
+  same way as s_telemTxDropCount.
 - Pi side: a parser in ESC_based/software/can_interface.py (Pi session).
 - Same hard rules as above: hand edit only, never regenerate.
 
 ===========================================================================
-CHANGE 5 (FUTURE -- DO NOT APPLY YET; logged 2026-10-28 at the user's request;
+CHANGE 5 (APPLY THIS ROUND, design reported first -- see STATUS; logged 2026-10-28;
 apply together with CHANGE 4, behind a compile-time switch)
 Offset calibration with the bridge SWITCHING at 50 % duty (zero net current)
 ===========================================================================
@@ -293,6 +315,12 @@ c_ch18 -- via a third polarization pass with PolarizationSector = SECTOR_2,
 using the __weak R3_2_CurrentReadingPolarization / R3_2_GetPhaseCurrents
 overrides in user code (MCSDK copy untouched). PolarizationOffsets_t needs
 a fourth field for Set/Get.
+Pi evidence for this (2026-10-28, hand-held stall steps, TEST_LOG): the
+measured-Iq breakdown is ANGLE-dependent -- onset ~0.55 A at electrical
+42-67 deg, ~0.8 A at 144/323 deg, none up to 0.8 A at 258 deg (angles
+relative to the encoder electrical zero) -- i.e. it tracks the
+sector/sampling path, at lower current than the 0.9-1.0 A the review
+estimated from Rs 5.29 ohm / 13 V (check the real Vbus and Rs).
 
 VERIFY ON THE PI AFTER FLASHING (with CHANGE 4)
 cal_repeat.py --n 5 --wait 60 cold, then again warm right after: with
@@ -300,7 +328,7 @@ CHANGE 5 the 7/rev at t=0 of the WARM run should be ~cold value and the
 growth within a START smaller; CHANGE 4's NTC trace shows the temperature.
 
 ===========================================================================
-CHANGE 6 (FUTURE -- recommended at the next flash; logged 2026-10-28)
+CHANGE 6 (APPLY THIS ROUND, values reported first -- see STATUS; logged 2026-10-28)
 SAFETY: revert the over-current threshold rescaling
 ===========================================================================
 

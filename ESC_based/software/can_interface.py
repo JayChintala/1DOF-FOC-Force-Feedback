@@ -29,6 +29,15 @@ ESC_based/STM32/MCWorkbench/Inc/can_driver.h):
                                [7]    uint8   peer TELEM age, 0.1 ms (255 = >=25.5 ms)
                              Every tick while coupling is requested/engaged,
                              10 Hz otherwise.
+    0x100+base+0x013 CALIB   MCU->Pi  8 bytes LE, 10 Hz (FIRMWARE_CHANGES CHANGE 4):
+                               [0..1] [2..3] [4..5] [6..7] uint16 phase offsets
+                               A, B, C (ch12 path), C (ch18 path; 0 = n/a),
+                               raw left-aligned ADC units
+    0x100+base+0x014 DIAG    MCU->Pi  8 bytes LE, 10 Hz (CHANGE 4):
+                               [0..1] int16 Vqd.q   [2..3] int16 Vqd.d
+                               [4] uint8 sector     [5] uint8 flags (DIAG_*)
+                               [6..7] int16 board NTC, deg C
+                             Both absent on firmware without CHANGE 4.
 
 The TELEM layout is unchanged, so this module still works against the
 original firmware for everything except the coupling commands and DBG.
@@ -59,6 +68,12 @@ OFFSET_TELEM = 0x012
 # DBG sits 0x100 above TELEM, outside every node's block, so it loses
 # arbitration to all control traffic -- see CAN_ID_DBG in can_driver.h.
 OFFSET_DBG = 0x100 + OFFSET_TELEM
+OFFSET_CALIB = 0x100 + 0x013    # CHANGE 4 diagnostics, outside the node block
+OFFSET_DIAG = 0x100 + 0x014
+# DIAG flags byte
+DIAG_SECTOR5_FORCED = 1 << 0
+DIAG_CIRCLE_LIMIT = 1 << 1
+DIAG_CALIB_SWITCHING = 1 << 2
 
 COUPLE_MODE_OFF = 0
 COUPLE_MODE_HOLD = 1
@@ -250,7 +265,7 @@ class _SharedBus:
     def register(self, iface, channel, bustype):
         """Subscribe iface's telemetry IDs and make sure the RX thread runs."""
         with self._lock:
-            arb_ids = [iface._id_telem, iface._id_dbg]
+            arb_ids = [iface._id_telem, iface._id_dbg, iface._id_calib, iface._id_diag]
 
             table = self._nodes.setdefault(channel, {})
             for arb_id in arb_ids:
@@ -363,6 +378,13 @@ class MotorCANInterface:
         self._id_couple_mode = node_base + OFFSET_COUPLE_MODE
         self._id_telem = node_base + OFFSET_TELEM
         self._id_dbg = node_base + OFFSET_DBG
+        self._id_calib = node_base + OFFSET_CALIB
+        self._id_diag = node_base + OFFSET_DIAG
+        # Latest CALIB / DIAG (CHANGE 4 firmware only), plus a bounded
+        # history of DIAG for logging: (rx time, vq, vd, sector, flags, temp).
+        self.calib = None
+        self.diag = None
+        self.diag_history = collections.deque(maxlen=20000)
 
         # Latest TELEM.
         self.iq_readback = None
@@ -445,6 +467,21 @@ class MotorCANInterface:
             self._handle_telem(msg)
         elif msg.arbitration_id == self._id_dbg:
             self._handle_dbg(msg)
+        elif msg.arbitration_id == self._id_calib:
+            off_a, off_b, off_c12, off_c18 = struct.unpack("<HHHH", msg.data)
+            with self._lock:
+                self.calib = {"off_a": off_a, "off_b": off_b, "off_c_ch12": off_c12,
+                              "off_c_ch18": off_c18 or None, "time": time.time()}
+        elif msg.arbitration_id == self._id_diag:
+            vq, vd, sector, flags, temp = struct.unpack("<hhBBh", msg.data)
+            now = time.time()
+            with self._lock:
+                self.diag = {"vq": vq, "vd": vd, "sector": sector, "flags": flags,
+                             "sector5_forced": bool(flags & DIAG_SECTOR5_FORCED),
+                             "circle_limit": bool(flags & DIAG_CIRCLE_LIMIT),
+                             "calib_switching": bool(flags & DIAG_CALIB_SWITCHING),
+                             "temp_c": temp, "time": now}
+                self.diag_history.append((now, vq, vd, sector, flags, temp))
 
     def _handle_telem(self, msg):
         iq, enc_raw, mcu_us = struct.unpack("<fHH", msg.data)
@@ -520,6 +557,19 @@ class MotorCANInterface:
                 "enc_count_time": self.last_rx_time,
                 "iq_readback_bus_time": self.enc_count_bus_time,
             }
+
+    def get_diag(self) -> dict:
+        """Latest CALIB and DIAG frames (None before one arrives, or on
+        firmware without CHANGE 4)."""
+        with self._lock:
+            return {"calib": dict(self.calib) if self.calib else None,
+                    "diag": dict(self.diag) if self.diag else None}
+
+    def drain_diag_history(self) -> list:
+        with self._lock:
+            out = list(self.diag_history)
+            self.diag_history.clear()
+        return out
 
     def get_debug(self) -> dict:
         with self._lock:

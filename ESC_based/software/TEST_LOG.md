@@ -4150,6 +4150,74 @@ secondary issue."
 
 ---
 
+## 2026-10-28: Follower stall-step test by hand at 4 rotor angles — the current breakdown is ANGLE-dependent
+
+**Setup:** `b7_force_cal.py --sign -1 --log logs/STALL_pos{1..4}_2026-10-28.csv`.
+The user held the follower arm still by hand (scale removed); levels
+0.05 → 0.80 A, 5 s each. "Electrical angle" = (raw mod 571.43) / 571.43
+× 360°, relative to the encoder's electrical zero.
+
+| Electrical angle (raw) | 0.60 A cmd: mean (std) | 0.80 A cmd: mean (std) | Low-level std |
+|---|---|---|---|
+| 42° (1777, pos 3) | **0.578 (57 mA)** ✗ | **0.640 (92 mA)** ✗ | about 10 mA |
+| 67° (2963, scale test) | **0.574 (56 mA)** ✗ | **0.654 (116 mA)** ✗ | 10–14 mA |
+| 144° (1940, pos 2) | 0.598 (8 mA) ✓ | 0.781 (52 mA) onset | about 3 mA |
+| 258° (2125, pos 1) | 0.594 (17 mA) ✓ | 0.789 (25 mA) ✓ | about 10 mA |
+| 323° (1656, pos 4) | 0.597 (11 mA) ✓ | 0.781 (46 mA) onset | about 3 mA |
+
+Levels 0.05–0.45 A: within 1 % everywhere.
+
+**Reading:**
+
+- **Measured:** the onset current depends on rotor angle: about 0.55 A
+  at 42–67°, about 0.8 A at 144/323°, above 0.8 A at 258°.
+- **Inferred:** this points to the duty-dependent sampling/sector path
+  (forced SECTOR_5 ends; sectors 2–3 read C on ch18 with the ch12
+  offset; shorter windows), not the analog range (already ruled out).
+  The onset is lower than the dev session's 0.9–1.0 A estimate, which
+  suggests a higher Rs or a lower Vbus than the 5.29 Ω / 13 V
+  constants. The user's supply voltage is asked.
+- The low-current noise floor also varies with angle (3 vs 10 mA),
+  probably from how the per-phase noise projects onto Iq (inferred).
+
+**Fix path:** next flash, already in `FIRMWARE_CHANGES.txt`.
+
+- CHANGE 5 with the per-path C offset.
+- CHANGE 4's Vqd/Sector frame, to confirm the cause.
+- The dev's alternative: MAX_MODULE about 69 %.
+- Until then (user: no current cap), the felt and estimated force
+  under-read above about 0.55 A at bad angles, and the real current can
+  overshoot the command.
+
+---
+
+## 2026-10-28: Firmware round prepared — CHANGE 4, 5, 6 marked to apply (two phases); Pi parsers for CALIB/DIAG
+
+**User:** "let's do the firmware changes first", ahead of the D1 rerun.
+
+**`FIRMWARE_CHANGES.txt` STATUS rewritten:**
+
+- **Phase 1 (read-only):** the dev session reports the design/diff for
+  CHANGE 5 and 6 and the TX budget for CHANGE 4, then stops.
+- **Phase 2 (after user approval):** implement behind compile-time
+  switches, build, flash when told.
+
+**CHANGE 4 frame layouts fixed:**
+
+- **CALIB** 0x100+base+0x013: u16 offA, offB, offC_ch12, offC_ch18.
+- **DIAG** 0x100+base+0x014: i16 Vqd.q, i16 Vqd.d, u8 sector, u8 flags
+  (bit 0 SECTOR_5 forced, bit 1 circle limit, bit 2 switching-cal built
+  in), i16 NTC °C. 10 Hz each, on alternate tick slots.
+
+**`can_interface.py`:**
+
+- Parses both frames: `get_diag()`, plus `drain_diag_history()`
+  (bounded deque).
+- Tested offline with synthetic frames. `bus_check` still OK on the
+  current firmware (frames absent, as expected).
+
+---
+
 ## Phase A summary (2026-10-20)
 
 | Step | Result | Key number |
