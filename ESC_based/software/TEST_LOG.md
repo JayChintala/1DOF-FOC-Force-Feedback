@@ -3,9 +3,9 @@
 Running log of the Phase A–D plan, run on the Pi against the ESC_based
 firmware on both B-G431B-ESC1 boards. Newest entries at the bottom.
 
-## TL;DR (updated 2026-10-26, end of day: contact spring + in-session leader calibration adopted)
+## TL;DR (updated 2026-10-28: firmware 75a893b flashed; CHANGE 7 next; see 0c)
 
-**Status:** Phase A done; B mostly done; **C1–C3 done**; sustained holds fixed (contact spring); leader ripple largely compensated (in-session cal). Leader 7/rev in teleop, in-depth tuning and Phase D next. **See "0b. RESUME HERE".**
+**Status:** C1–C3 done; holds fixed (contact spring); leader ripple largely compensated (in-session cal). Force calibrated at the tip (1.044 N/A below ~0.45 A); measured Iq breaks down above ~0.55 A at some angles (firmware CHANGE 7 next). Firmware 75a893b (CHANGES 1–6) flashed. **See "0c. RESUME HERE".**
 
 | Step | Status |
 |---|---|
@@ -25,7 +25,7 @@ firmware on both B-G431B-ESC1 boards. Newest entries at the bottom.
 
 **Host stalls:** fixed (RT priority + `TELEOP_LOG_DIR` RAM logging).
 
-- **To resume, read "Handoff → 0b. RESUME HERE"** first (it has the
+- **To resume, read "Handoff → 0c. RESUME HERE"** first (it has the
   current operating-point command). Then use the start-of-session
   checklist.
 - Code through 2026-10-28 is committed and pushed on branch
@@ -4401,7 +4401,96 @@ improvement plan" brief, Phases A–D. Its steps, pass thresholds and
 rules are restated below where they matter. Everything here was checked
 against the code and the logs above.
 
-### 0b. RESUME HERE (state at end of 2026-10-26) — supersedes 0a
+### 0c. RESUME HERE (state at end of 2026-10-28) — supersedes 0b and 0a
+
+**Where things stand:**
+
+1. **Feel (done, adopted):**
+   - Contact spring (`TELEOP_HOLD_*`): holds feel solid.
+   - In-session leader calibration (`TELEOP_LEADER_CAL=1`): 12/rev
+     snapping cut.
+   - Leader 7/rev work: closed as secondary. Its growth in RUN is
+     thermal offset drift after calibration (inferred).
+2. **Force calibration at the follower tip, scale (2026-10-28):**
+   - **1.044 N/A** below about 0.45 A (R² 0.995). It is used for
+     `tau_env_N` and the plots.
+   - **Above about 0.55 A at some rotor angles, measured Iq reads low and
+     noisy, and the real current overshoots** (≈ 0.93 A at a 0.8 A
+     command). Measured in the stall-step logs `STALL_*`.
+   - **The user chose NOT to cap the current** (`TELEOP_IQ1_MAX_A` stays
+     0.8).
+   - **Supply is 12 V.**
+3. **Firmware:**
+   - **On both boards:** `75a893b` (CHANGES 1–6), flashed and verified.
+     - CALIB/DIAG frames at 10 Hz (A 0x113/0x114, B 0x133/0x134); the
+       Pi parses them (`can_interface.get_diag`,
+       `save_diag_history`).
+     - Switching offset calibration plus a separate phase-C ch18 offset
+       (it was 110–140 mA off).
+     - OCP threshold reverted (8167).
+   - **This firmware did not fix** the breakdown, or the 7/rev growth.
+   - **DIAG shows** the breakdown happens while still in forced A+B
+     sampling, with Vq jumping 29 → 55 % from 0.45 to 0.6 A. The
+     sampling-window/Tafter hypothesis is the leading candidate.
+   - **Next round = CHANGE 7** in `FIRMWARE_CHANGES.txt`: Tafter
+     adjustable (ideally a runtime SET_PARAM CAN command, base+0x007),
+     DIAG flag bugs (bits 1/3/4), optional pre-limit Vq.
+   - **Waiting on:** the user to paste the dev session's Phase 1 report.
+     Review it, then the user approves Phase 2. After the flash, add a
+     Pi-side SET_PARAM sender if implemented, and run the stall steps at
+     a bad angle for each Tafter value.
+
+**Operating point:**
+
+```
+cd ESC_based/software
+TELEOP_FRAME_QUEUE=1 TELEOP_SHADOW_TAU_ENV=1 TELEOP_FOLLOWER_MODEL=follower_model_arm3d.json \
+TELEOP_FELT_SOURCE=tau_env TELEOP_K_F=1.0 TELEOP_FELT_DEADBAND_A=0.02 TELEOP_KB_DAMP=0.35e-5 \
+TELEOP_HOLD_K=0.5e-3 TELEOP_HOLD_MAX_A=0.05 TELEOP_HOLD_RAMP_S=0.3 TELEOP_IQ1_MAX_A=0.8 \
+TELEOP_LEADER_CAL=1 TELEOP_LOG_DIR=/dev/shm/teleop timeout -s INT 90 taskset -c 2,3 python3 teleop_test.py
+```
+
+- **The first about 30 s is the leader cal:** hands off the leader.
+  It turns one rev one way, pauses, one rev back, then stops; that stop
+  is the user's cue. The follower is limp during it.
+- `TELEOP_LEADER_WARMUP_S` exists (default 0).
+
+**Tools:**
+
+- `bus_check.py` (passive).
+- `zero_iq_check.py` (alignment after any reset; both arms free).
+- `b7_force_cal.py --sign -1 --log <name>`: static force on the scale,
+  or hand-held stall steps; saves `_diag.csv`.
+- `cal_repeat.py`: leader cal sweeps in one START.
+- `friction_map.py`, `leader_cal.py`, `hold_eval.py`, `plot_reference.py`.
+
+**Session start:**
+
+1. `bus_check.py`.
+2. If RESET, `zero_iq_check.py`, with the user's go and both arms free.
+3. **ESCs drop off or reset spontaneously sometimes** (both at once;
+   can0 ERROR-PASSIVE when absent). The user re-plugs the ESC power.
+
+**Rules:**
+
+- Every motor test needs the user's "go" (shafts clear, user present).
+- The user's feel report decides.
+- Firmware changes happen only via `FIRMWARE_CHANGES.txt` → the dev
+  session, two-phase. Never regenerate MCSDK.
+- Commit and push when the user asks; they have been approving.
+
+**Next options for the user after CHANGE 7:**
+
+- **D1 rerun** (force accuracy on the scale, presses with timestamped
+  readings). Can be done now below 0.5 A, or over the full range after
+  CHANGE 7.
+- **D2** stiffness (foam vs rigid).
+- **D3** taps.
+- **D4** blind rigid-vs-soft trials (the end goal).
+- **Deferred in-depth tuning:** HOLD_K, KB_DAMP 0.5e-5, light-hold
+  steadiness, wall stiffness below the ceiling.
+
+### 0b. RESUME HERE (state at end of 2026-10-26) — superseded by 0c
 
 **Today, in order:**
 
