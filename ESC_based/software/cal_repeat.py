@@ -89,6 +89,9 @@ def main():
             except Exception as e:
                 print(f"[warn] stop: {e}")
             m.stop_listening()
+        for name, m in (("A", a), ("B", b)):
+            if m.save_diag_history(f"{stem}_diag{name}.csv"):
+                print(f"DIAG {name} -> {stem}_diag{name}.csv")
     with open(stem + ".json", "w") as f:
         json.dump(results, f, indent=1)
     print(f"saved {stem}.json")

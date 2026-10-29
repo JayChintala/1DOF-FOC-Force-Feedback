@@ -9,6 +9,14 @@ friction measurements" entries explain why).
 INSTRUCTIONS FOR THE CLAUDE CODE SESSION
 ===========================================================================
 
+UPDATE 2026-10-28 (Pi): CHANGES 3-6 are IMPLEMENTED and pushed by the dev
+session (856a6bb = CHANGES 1-2 rebased, 75a893b = CHANGES 3-6; both builds
+0 warnings). NOT YET FLASHED at the time of writing. Deviation from the
+text below, approved by the user: the ch18 phase-C offset is exposed by an
+accessor (OffsetCalib_GetPhaseCCh18), PolarizationOffsets_t is unchanged.
+Images: Debug/ESC_based.elf (ESC1) sha256 49363e6a..84b6,
+Debug_ESC2/ESC_based.elf (ESC2) sha256 72e80386..c23a.
+
 STATUS (2026-10-28): CHANGES 1-3 are ALREADY APPLIED and flashed (1-2 on
 2026-10-25, 3 on 2026-10-26; the CHANGE 3 edit is still uncommitted on the
 dev machine). Check they are present -- do not apply them twice.

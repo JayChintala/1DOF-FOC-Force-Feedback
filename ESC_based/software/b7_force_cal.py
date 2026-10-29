@@ -118,6 +118,9 @@ def run(sign, log=LOG):
         except Exception as e:
             print(f"[warn] stop sequence: {e}")
         m.stop_listening()
+    n_diag = m.save_diag_history(log[:-4] + "_diag.csv")
+    if n_diag:
+        print(f"DIAG frames: {n_diag} -> {log[:-4]}_diag.csv")
     with open(log, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["level", "iq_cmd", "bus_time", "mcu_time_us", "enc", "iq_meas"])

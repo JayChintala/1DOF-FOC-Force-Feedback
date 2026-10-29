@@ -35,7 +35,7 @@ ESC_based/STM32/MCWorkbench/Inc/can_driver.h):
                                raw left-aligned ADC units
     0x100+base+0x014 DIAG    MCU->Pi  8 bytes LE, 10 Hz (CHANGE 4):
                                [0..1] int16 Vqd.q   [2..3] int16 Vqd.d
-                               [4] uint8 sector     [5] uint8 flags (DIAG_*)
+                               [4] uint8 sector (0 = SECTOR_1)  [5] uint8 flags (DIAG_*)
                                [6..7] int16 board NTC, deg C
                              Both absent on firmware without CHANGE 4.
 
@@ -70,10 +70,13 @@ OFFSET_TELEM = 0x012
 OFFSET_DBG = 0x100 + OFFSET_TELEM
 OFFSET_CALIB = 0x100 + 0x013    # CHANGE 4 diagnostics, outside the node block
 OFFSET_DIAG = 0x100 + 0x014
-# DIAG flags byte
-DIAG_SECTOR5_FORCED = 1 << 0
-DIAG_CIRCLE_LIMIT = 1 << 1
-DIAG_CALIB_SWITCHING = 1 << 2
+# DIAG flags byte -- CAN_DIAG_FLAG_* in can_driver.h (firmware 75a893b)
+DIAG_SECTOR5_FORCED = 1 << 0     # snapshot, same period as the sector byte
+DIAG_CIRCLE_SEEN = 1 << 1        # sticky since the previous DIAG
+DIAG_OFFSET_SW_BUILT = 1 << 2    # OFFSET_CALIB_SWITCHING built in
+DIAG_NONFORCED_SEEN = 1 << 3     # sticky: natural (non-forced) sector read used
+DIAG_CH18_SEEN = 1 << 4          # sticky: sectors 2-3 (phase C on ADC2 ch18) used
+DIAG_CALIB_SWITCHED = 1 << 5     # the last calibration actually switched
 
 COUPLE_MODE_OFF = 0
 COUPLE_MODE_HOLD = 1
@@ -470,16 +473,23 @@ class MotorCANInterface:
         elif msg.arbitration_id == self._id_calib:
             off_a, off_b, off_c12, off_c18 = struct.unpack("<HHHH", msg.data)
             with self._lock:
-                self.calib = {"off_a": off_a, "off_b": off_b, "off_c_ch12": off_c12,
-                              "off_c_ch18": off_c18 or None, "time": time.time()}
+                # all zero until the first calibration completes
+                self.calib = (None if not (off_a or off_b or off_c12) else
+                              {"off_a": off_a, "off_b": off_b, "off_c_ch12": off_c12,
+                               "off_c_ch18": off_c18 or None, "time": time.time()})
         elif msg.arbitration_id == self._id_diag:
             vq, vd, sector, flags, temp = struct.unpack("<hhBBh", msg.data)
             now = time.time()
             with self._lock:
-                self.diag = {"vq": vq, "vd": vd, "sector": sector, "flags": flags,
+                self.diag = {"vq": vq, "vd": vd,
+                             "sector": sector + 1,  # firmware SECTOR_1 = 0 ... SECTOR_6 = 5
+                             "flags": flags,
                              "sector5_forced": bool(flags & DIAG_SECTOR5_FORCED),
-                             "circle_limit": bool(flags & DIAG_CIRCLE_LIMIT),
-                             "calib_switching": bool(flags & DIAG_CALIB_SWITCHING),
+                             "circle_seen": bool(flags & DIAG_CIRCLE_SEEN),
+                             "offset_sw_built": bool(flags & DIAG_OFFSET_SW_BUILT),
+                             "nonforced_seen": bool(flags & DIAG_NONFORCED_SEEN),
+                             "ch18_seen": bool(flags & DIAG_CH18_SEEN),
+                             "calib_switched": bool(flags & DIAG_CALIB_SWITCHED),
                              "temp_c": temp, "time": now}
                 self.diag_history.append((now, vq, vd, sector, flags, temp))
 
@@ -570,6 +580,18 @@ class MotorCANInterface:
             out = list(self.diag_history)
             self.diag_history.clear()
         return out
+
+    def save_diag_history(self, path):
+        """Write (and clear) the DIAG history as CSV; returns the row count.
+        Empty on firmware without CHANGE 4."""
+        rows = self.drain_diag_history()
+        if rows:
+            import csv
+            with open(path, "w", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(["rx_time", "vq", "vd", "sector0", "flags", "temp_c"])
+                w.writerows(rows)
+        return len(rows)
 
     def get_debug(self) -> dict:
         with self._lock:

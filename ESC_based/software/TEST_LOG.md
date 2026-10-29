@@ -4218,6 +4218,54 @@ Levels 0.05–0.45 A: within 1 % everywhere.
 
 ---
 
+## 2026-10-28: Firmware CHANGES 3–6 implemented by the dev session (not flashed yet); Pi side matched
+
+**Dev session:**
+
+- Rebased its local `d9a55ef` (CHANGES 1–2) onto 689b110 → `856a6bb`.
+- Implemented CHANGES 3–6 → **`75a893b`**. Both builds: 0 warnings,
+  0 errors.
+- The map file confirms the `offset_calib.o` overrides replace the
+  MCSDK `__weak` versions.
+
+**Key points:**
+
+- **CHANGE 5 hazard handled:** FOC writes CCR1-3 during calibration, so
+  the override pins them at 50 %.
+- **Sequence:** 10 ms precharge inside the override; then passes
+  SECTOR_5 (A+B), SECTOR_2 (C on ch18), SECTOR_1 (C on ch12); 16
+  settle periods dropped after each path change; about 37 ms blocking.
+- **Guards:** a |speed| > 0.1 Hz guard falls back to stock; a BRK check
+  after each pass restores the previous offsets and sets OverCurrent.
+- **PI integrators** are cleared by FOC_Clear before ALIGNMENT/RUN
+  (`mc_tasks_foc.c:369`, 419, 333). No kick.
+- **CHANGE 6:** DAC_OCP_Threshold 16334 → 8167 (`OCP_DAC_REVERT_PRE16X`).
+- **Images:**
+  - ESC1 `Debug/ESC_based.elf`: sha256 49363e6a…84b6.
+  - ESC2 `Debug_ESC2/ESC_based.elf`: sha256 72e80386…c23a.
+- `offset_calib.c` was added by hand to the git-ignored Debug makefiles.
+  A GUI rebuild should pick it up (untested).
+
+**Pi side:**
+
+- Fast-forwarded to 75a893b.
+- `can_interface.py` flags now match `CAN_DIAG_FLAG_*` (bits 0–5).
+  The sector is reported 1–6 (firmware 0–5). An all-zero CALIB means
+  not calibrated.
+- `save_diag_history()` added; `b7_force_cal.py` and `cal_repeat.py`
+  now save `*_diag*.csv`.
+
+**Post-flash plan:**
+
+1. `bus_check`, then `zero_iq_check`.
+2. Check that CALIB/DIAG arrive.
+3. Stall steps at the bad angle (about 42° electrical, raw about 1777),
+   with DIAG: has the breakdown gone, and what do the sector/ch18 flags
+   say?
+4. `cal_repeat` cold, then warm: has the 7/rev growth gone?
+
+---
+
 ## Phase A summary (2026-10-20)
 
 | Step | Result | Key number |
