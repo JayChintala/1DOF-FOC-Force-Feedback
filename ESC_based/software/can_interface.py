@@ -72,6 +72,11 @@ OFFSET_COUPLE_LOCAL = 0x005
 OFFSET_COUPLE_MODE = 0x006
 OFFSET_SET_PARAM = 0x007       # CHANGE 7: <B i> param id, int32 value
 PARAM_TAFTER = 1               # sampling delay, TIM1 counts, accepted 400..2040 (stock 807)
+# Sent before every START (RAM-only in the firmware, back to 807 on reset).
+# 400 keeps the forced mid-period A+B read up to 0.8 A stalled; 807 breaks
+# down above ~0.55 A at some angles (TEST_LOG 2026-10-29). ESC_TAFTER=807
+# restores stock.
+DEFAULT_TAFTER = int(os.environ.get("ESC_TAFTER", "400"))
 OFFSET_TELEM = 0x012
 # DBG sits 0x100 above TELEM, outside every node's block, so it loses
 # arbitration to all control traffic -- see CAN_ID_DBG in can_driver.h.
@@ -453,6 +458,7 @@ class MotorCANInterface:
             self._bustype)
 
     def send_start(self):
+        self.send_tafter(DEFAULT_TAFTER)
         self._send(self._id_start)
 
     def send_stop(self):

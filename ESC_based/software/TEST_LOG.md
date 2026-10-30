@@ -3,7 +3,7 @@
 Running log of the Phase A–D plan, run on the Pi against the ESC_based
 firmware on both B-G431B-ESC1 boards. Newest entries at the bottom.
 
-## TL;DR (updated 2026-10-28: firmware 75a893b flashed; CHANGE 7 next; see 0c)
+## TL;DR (updated 2026-10-29: Tafter 400 fixes the >0.55 A current breakdown; leader contact spring + follower position coupling = new operating point; see 0c UPDATE 3)
 
 **Status:** C1–C3 done; holds fixed (contact spring); leader ripple largely compensated (in-session cal). Force calibrated at the tip (1.044 N/A below ~0.45 A); measured Iq breaks down above ~0.55 A at some angles (firmware CHANGE 7 next). Firmware 75a893b (CHANGES 1–6) flashed. **See "0c. RESUME HERE".**
 
@@ -4412,6 +4412,476 @@ Levels 0.05–0.45 A: within 1 % everywhere.
 
 ---
 
+## 2026-10-29: Firmware b26c643 (CHANGE 7) flashed — Tafter sweep FAILS; raising Tafter makes the breakdown WORSE
+
+**Pre-checks:**
+
+- `bus_check`: RESET on both, as expected after the flash.
+- DIAG2 0x115/0x135 at 10/s, Tafter 807.
+- `zero_iq_check` PASS: run0 +0.0000 / +0.0001 A, std 6.7 / 5.5 mA.
+- Flags 0x24 (switching calibration used).
+- Offsets within about 15 counts of 75a893b.
+- NTC: follower 18 °C, leader 34 °C.
+
+**`tafter_sweep.py` gained a live angle guide** (passive, before START).
+It prints the electrical angle and the distance to a `--window` (default
+40–70°), and starts after 2 s held inside it. The summary has a per-level
+angle column. The user ran it in their own terminal (the user can't
+watch a plot).
+
+**Sweep** (`logs/tafter_sweep_20261029_000433{.csv,_diag.csv,_diag2.csv}`,
+follower, hand-held, levels at 57–80° electrical):
+
+| Tafter | 0.30 | 0.45 | 0.60 | 0.80 (cmd, A) |
+|---|---|---|---|---|
+| 807 (stock, MaxMod 89 %) | −1.4 % (15) | −1.9 % (21) | −3.0 % (48) | **−14.0 % (107)** |
+| 1360 (MaxMod 85 %) | −1.2 % (13) | −1.7 % (25) | −7.1 % (73) | **−31.9 % (47)** |
+| 2040 (MaxMod 70.5 %) | −1.4 % (15) | −3.1 % (46) | −19.5 % (85) | **−42.6 % (45)** |
+
+Error of the mean, with the std in mA in brackets. The 807 row repeats
+75a893b (0.582 / 0.688 then 0.581 / 0.683).
+
+**Non-forced (natural-sector) periods per DIAG2 frame** (of about 1600):
+
+| Tafter | 0.30 | 0.45 | 0.60 | 0.80 |
+|---|---|---|---|---|
+| 807 | 32 | 44 | 231 | 755 |
+| 1360 | 87 | 259 | 919 | 1427 |
+| 2040 | 725 | 1369 | 1547 | 1573 |
+
+**Vq snapshot** (DIAG2 vq_pre, one period per frame), median (p10–p90):
+
+| Tafter | 0.30 | 0.45 | 0.60 | 0.80 |
+|---|---|---|---|---|
+| 807 | 19 (15–32) | 31 (23–40) | 42 (29–82) | 65 (49–100) |
+| 1360 | 25 | 33 | 87 | 100 |
+| 2040 | 24 | 36 | 99 | 100 |
+
+**Findings:**
+
+- **FAIL at every Tafter** (pass: within 2 %, std ≤ 25 mA, up to 0.8 A).
+  Stock 807 is the best of the three.
+- **The error tracks the share of non-forced sampling.** Raising Tafter
+  ends forced A+B mid-period sampling at lower duty. The natural-sector
+  reads at this angle are noisier and read low. Example: 2040 at
+  0.45 A is 86 % natural, −3.1 %, 46 mA. So the hypothesis direction is
+  reversed: the forced mid-period read is the GOOD path here, not the bad
+  one.
+- **Inferred true current from Vq** (stalled, so Vq ∝ R·I; 0.45 A ↔
+  31 %):
+  - 807 at 0.6 A: Vq 42 % ≈ proportional, so the true current ≈ 0.6 A
+    and the read is about right.
+  - 807 at 0.8 A: Vq 65 % (54 % expected), so the true current is about
+    0.96 A. This fits the scale (about 0.93 A).
+  - At 1360 / 2040 the PI winds to the voltage limit, so the true
+    current was about 1.2 / 1.0 A for 4 s. Brief, and the user held.
+- **Vq jumps period to period** (p10–p90 spans 29–82 % at 807 / 0.6 A).
+  The circle-limited count follows the non-forced count (both come with
+  max duty). Single-period read spikes plus a stiff PI may feed this
+  (inferred).
+- **CHANGE 7 conclusion:** sweep Tafter DOWN (≤ 807 keeps MaxModule at
+  89 %), so forced mid-period sampling lasts to a higher duty. The open
+  question is whether the forced read stays accurate with a shorter
+  settle (600 ≈ 3.5 µs, 400 ≈ 2.4 µs).
+
+---
+
+## 2026-10-29: Tafter swept DOWN — 400 fixes the breakdown at a bad angle (−2.0 %, 29 mA at 0.8 A)
+
+`tafter_sweep.py --values 807,600,400`, follower hand-held at 47–51°
+electrical (the guide window). Log
+`logs/tafter_sweep_20261029_001553{.csv,_diag.csv,_diag2.csv}`.
+
+| Tafter | 0.30 | 0.45 | 0.60 | 0.80 (cmd, A) | non-forced/frame at 0.8 |
+|---|---|---|---|---|---|
+| **400** | −1.4 % (14) | −1.6 % (17) | −1.6 % (22) | **−2.0 % (29)** | **0.1** |
+| 600 | −1.3 % (14) | −1.8 % (19) | −2.5 % (38) | −11.2 % (108) | 457 |
+| 807 (stock) | −1.3 % (15) | −1.8 % (20) | −3.3 % (53) | −14.8 % (100) | 842 |
+
+**Vq snapshot / |I|** (median, %full per A; stalled, so it tracks the
+true current):
+
+- **400:** 72 / 78 / 68 / 71 at 0.3 / 0.45 / 0.6 / 0.8 A. Flat, so the
+  true current equals the command. The p90 of Vq at 0.8 A is 65 %, never
+  the limit.
+- 807 at 0.8 A: 122, so the true current is about 1.4× the reading (as
+  before).
+
+**Findings:**
+
+- **400 nearly passes:** the mean is within 2.0 % up to 0.8 A (limit
+  2 %), std 29 mA (limit 25). There is no breakdown or runaway. The std
+  grows smoothly 14 → 29 mA with current.
+- The residual **−1.3 to −2.0 % is the same at every level and Tafter**,
+  so it is a small gain offset, not the breakdown (inferred).
+- **Measured:** forced A+B mid-period sampling stays accurate down to a
+  2.4 µs settle at 0.8 A. **Inferred:** the breakdown is in the
+  natural-sector path (`lowDuty + Tafter` / `lowDuty − Tbefore` sample
+  point, falling-edge mirror), not front-end settling. A dev-session
+  question for later, since Tafter 400 bypasses it up to at least
+  0.8 A stalled.
+- **Not yet checked:**
+  - a good angle (258°) at 400 (regression);
+  - with back-EMF (motion), higher Vq may still reach the natural path,
+    so watch the DIAG2 non-forced count in teleop;
+  - the leader.
+- **Tafter is RAM-only** (`s_tafter`). It resets to 807 on ESC reset.
+  `tafter_sweep` restores 807 before STOP.
+
+---
+
+## 2026-10-29: Good-angle check at Tafter 400 — no regression; 400 made the Pi default
+
+The Pi was rebooted with the ESCs. `bus_check` showed RESET on both and can0
+ERROR-PASSIVE (tx 130, sent while the ESCs were unpowered).
+`zero_iq_check` PASS (+0.0003 A both); can0 back to ERROR-ACTIVE 0/0.
+Both boards loaded encoder 142 (90° electrical) at alignment, so the
+angle reference is unchanged.
+
+`tafter_sweep.py --values 807,400 --window 240,275`, follower held at
+256–263° electrical. Log `logs/tafter_sweep_20261029_093743*`.
+
+| Tafter | 0.30 | 0.45 | 0.60 | 0.80 (cmd, A) | non-forced/frame at 0.8 |
+|---|---|---|---|---|---|
+| **400** | −0.7 % (13) | −0.9 % (14) | −0.9 % (16) | **−1.6 % (26)** | 1.3 |
+| 807 | −0.7 % (12) | −0.9 % (14) | −1.0 % (18) | −3.8 % (55) | 438 |
+
+- **400 is equal or better at every level.** No regression at the good
+  angle.
+- Stock 807 at 258° now shows the onset at 0.8 A. On 75a893b (2026-10-28,
+  pos 1) it was 0.789 (25 mA). This is one hand-held run.
+- **At 400, both angles are within 2 % to 0.8 A.** Std is 26–29 mA at
+  0.8 A, against the 25 mA limit. The breakdown is gone; it is a near-pass
+  only on noise.
+
+**Pi default:** `can_interface.send_start()` now sends SET_PARAM Tafter
+`DEFAULT_TAFTER` before every START. It is 400, or set by the env
+`ESC_TAFTER` (807 = stock). Every script gets it.
+
+- The firmware applies SET_PARAM in IDLE too (checked: DIAG2 reads 400
+  on both boards, not rejected).
+- `tafter_sweep` now restores DEFAULT_TAFTER, not 807, before STOP.
+
+**Next:** scale check (force linear to 0.8 A at about 1.044 N/A), then
+D1. In teleop, watch the DIAG2 non-forced count while moving (back-EMF
+adds Vq).
+
+---
+
+## 2026-10-29: Blind A/B teleop, Tafter 400 vs 807 — user preferred 400 (blind); data agree
+
+Two runs at the 0c operating point, one per Tafter (`ESC_TAFTER`).
+The order was random and hidden from the user until both reports were in.
+The run is 90 s, including the 30 s leader cal. Firm presses of the
+follower against a rigid object. DIAG2 0x115/0x135 was captured
+passively with candump.
+
+- Run 1: `logs/teleop_KVs3e-05_FB-1_11*`, Tafter **400**.
+- Run 2: `logs/teleop_KVs3e-05_FB-1_12*`, Tafter **807**.
+
+| | Run 1 (400) | Run 2 (807) |
+|---|---|---|
+| **User (blind)** | "decent, I could tell I hit something" | "**worse**, it buzzed a bit, may have felt weaker; hard to tell" |
+| Contact (abs iq_a_cmd > 0.3 A) / > 0.55 A / at the 0.8 A cap | 22.9 / 18.2 / 11.2 s | 14.9 / 9.8 / 1.0 s |
+| Follower readback ÷ cmd above 0.55 A (median) | 0.994 | 0.966 |
+| Readback − cmd std above 0.55 A | **30 mA** | **88 mA** |
+| Felt-cmd tick-to-tick std in contact (buzz proxy) | **7.0 mA** | **18.2 mA** |
+| Felt abs iq_b_cmd p90 in contact | 0.78 A | 0.68 A |
+| DIAG2 non-forced periods/frame (median / p90 / max) | 0 / 10 / 276 | 11 / 135 / 767 |
+| Frames with > 100 non-forced | 0.5 % | 10.9 % |
+
+**Findings:**
+
+- **The blind preference matches the data.** At 807, firm contacts reach
+  the natural-sector path. The felt command is 2.6× noisier tick to tick
+  (the "buzz"), and the follower reading scatters 3× more. At 400 the
+  natural path is nearly unused in teleop, even with motion (back-EMF).
+- **Caveat:** different presses in each run. Run 2 had less contact time,
+  and only 1 s at the cap. One A/B pair.
+- **Tafter 400 stays the default.**
+
+**User question: "did the motor top out?" Yes.** In run 1 the follower
+command sat at the 0.8 A cap for 11.2 s of 57 s.
+
+- The felt command plateaus at about 0.75 A (about 48 mN·m on the
+  leader).
+- Pushing harder moves the leader through it at constant force (about
+  900 counts in one 4 s press). That is the "low resistance after the
+  hit".
+- The cap is the 0.8 A thermal rating (user) and the firmware
+  NOMINAL_CURRENT.
+- **Options offered:**
+  1. raise the cap for brief peaks (user's call; check the firmware
+     torque limits first);
+  2. make the ceiling felt as a stop: stiffen the leader once the
+     follower saturates (host only).
+
+---
+
+## 2026-10-29: Rigid vs soft in teleop (D2 preview) — follower PASS (about 10× stiffer), feel FAIL (leader compliance masks it)
+
+The ESCs had reset; `zero_iq_check` PASS. The Tafter 400 default was
+confirmed live (DIAG2 `0x0190` on both, sent by `send_start()`).
+Operating point from 0c, 90 s runs. The user turned the leader for slow
+presses. The follower motor mount was clamped (user asked).
+
+- Run `_13`: no presses (user not engaged); discarded.
+- **Rigid:** `logs/teleop_KVs3e-05_FB-1_14*`, contact at about count 2762.
+- **Soft:** `logs/teleop_KVs3e-05_FB-1_15*`. The user had no linear foam
+  and used "a squishy object". Contact at 3550–3710, later 3350.
+
+New `stiffness_eval.py`, per press with quasi-static frames
+(abs(vel_a) < 300 counts/s): travel between the median position below
+0.3 N and above 0.7 N tip force. k is in N/mm at r = 75.7 mm
+(0.119 mm/count).
+
+| | Presses | Median travel 0.3 → 0.7 N | Median k |
+|---|---|---|---|
+| Rigid | 15 | **3 counts (0.36 mm)**; 3 presses ≤ 1 count | **≥ 1.6 N/mm** (encoder-limited) |
+| Soft | 16 | **30 counts (3.6 mm)** | **0.17 N/mm** (0.15 without the last 4) |
+| **Ratio** | | | **9.6×, PASS** (D2: ≥ 5×) |
+
+- **Pooling all frames gave 19.8×, which is inflated.** The soft object
+  shifted between presses (contact 3706 → 3548 → 3353), so the per-press
+  number is the one to use.
+- **The last 4 soft presses (at about 3350) read 0.5–1.2 N/mm.** The
+  object was pushed against something firm, or bottomed out (inferred).
+- **Rigid ≥ 1.6 N/mm agrees with C1** (≥ 6 N/mm at 4 cm): the same
+  rotational stiffness reads (40/75.7)² ≈ 0.28× at the longer arm.
+- The rigid run also hit a second stop at about 6119 (other side of the
+  swing; excluded by `--side`).
+- Forces reach 0.84 N, about the 0.8 A cap (1.044 N/A).
+
+**User feel report:** "the force bottomed out and the follower pushed it
+very little, so I couldn't tell." **FAIL on feel.**
+
+**Why (measured, per press, from first contact > 0.15 N to 0.7 N):**
+
+| | Leader travel | Follower travel | Time |
+|---|---|---|---|
+| Rigid | **382 counts (34°)** | 3 counts | 214 ms |
+| Soft | **452 counts (41°)** | 28 counts | 243 ms |
+
+- **The leader moves about 35–40° before the felt force reaches 0.7 N,
+  for both objects.** The follower moves 3 vs 28 counts. So the felt
+  build-up is the coupling's own compliance (velocity coupling, felt
+  force lagging tau_env), not the object. The object's 25-count
+  difference is about 18 % of the leader's travel, so it is not
+  perceptible.
+- **After 0.7 N the user pushes through the cap** for a median of 830 /
+  929 counts (75° / 84°).
+- **The force ceiling (about 0.84 N at the tip) is low for this object.**
+  It compresses only about 3.6 mm before the cap, so both objects read
+  as "hard" within the available force.
+
+**Two causes:**
+
+1. Rendered stiffness on the leader is set by the coupling (about 0.7 N
+   per 35°), not by the environment. A transparency problem.
+2. The force ceiling is too low to compress the object much.
+
+The options to fix it are given to the user.
+
+---
+
+## 2026-10-29: Option B — sponge (softer object) vs rigid
+
+The user chose B (softer object) first, then A (stiffer coupling at
+contact). Sponge run: `logs/teleop_KVs3e-05_FB-1_16*`, contact at about
+3350. Same operating point; compared with rigid `_14`.
+
+| | Follower k (per press, 0.3 → 0.7 N) | Follower travel | Leader travel, contact → 0.7 N |
+|---|---|---|---|
+| Rigid `_14` | ≥ 1.6 N/mm | 3 counts | 382 counts (34°) |
+| Squishy `_15` | 0.17 N/mm | 28 counts | 452 counts (41°) |
+| **Sponge `_16`** | **0.08 N/mm** (7 mm median) | **55 counts** | **473 counts (43°)** |
+
+- **Follower ratio rigid/sponge: 19.9×** (13 sponge presses).
+- **On the leader the difference is only +91 counts (+24 %)** over the
+  rigid case's 382. The coupling's own travel still dominates.
+- The sponge is not as soft as hoped (7 mm at 0.6 N): the 0.84 N ceiling
+  still limits how far it compresses.
+
+**User feel:** sponge "felt slightly softer". User: "the follower can
+accurately measure the force even if the leader is a bit noisy/hard to
+differentiate". Agreed: sensing is fine, rendering is the gap. Next:
+option A, a stiffer leader at contact.
+
+---
+
+## 2026-10-29: Option A designed — leader contact spring (offline sim + code; not run live yet)
+
+**Design.** On the existing contact latch (`ContactSpring`, engage
+abs(tau_env) > 0.08 A), the leader gets
+
+    iq_b_spring = -s * clamp(s * SIGN * K_L * (err - e0), 0, K_L_MAX) - B_L * vel_b_filt
+
+It is added to the felt command, only while latched. The sign is the felt
+force's (it resists the hand); there is no ramp.
+
+- New method `ContactSpring.leader(k, i_max)`.
+- Env: `TELEOP_LEADER_K` (A/count, 0 = off, ≤ 2e-2),
+  `TELEOP_LEADER_K_MAX_A` (default 0.4, ≤ 0.8),
+  `TELEOP_LEADER_CONTACT_DAMP` (≤ 5e-5). It needs `TELEOP_HOLD_K`.
+- Logged as `iq_b_spring`.
+
+**Offline sim** `leader_spring_sim.py`: extends `hold_sim.py` with follower
+motion and a wall of finite stiffness.
+
+- Walls from today's per-press data (A/count): rigid 0.22, squishy 0.024,
+  sponge 0.012.
+- Baseline (no leader spring) reproduces the measurement: leader travel
+  0.14 → 0.67 A of 427 / 418 / 401 counts (measured 382–473);
+  sponge/rigid 0.94 ("couldn't tell").
+
+| K_L (A/count), B_L | Leader travel, rigid / squishy / sponge (counts) | Sponge ÷ rigid |
+|---|---|---|
+| 0 (today) | 427 / 418 / 401 | 0.94 |
+| 2e-3, 0 | 41 / 56 / 74 | 1.8 |
+| 5e-3, 1e-5 | 15 / 32 / 52 | 3.4 |
+| 1e-2, 1e-5 | 7 / 25 / 46 | 6.2 |
+| 2e-2, 2e-5 | 6 / 24 / 44 | 7.6 |
+
+**Wind-up check** (force-controlled hand, steady 0.2 / 0.4 A push): with
+K_L the held force settles at 0.21 / 0.41 A, and the leader is fixed for
+4 s. There is no creep to the cap: the hand observer measures the true
+hand torque, so the leader spring is not forwarded to the follower.
+Without K_L the leader drifts back (the known fade).
+
+**Caveats (inferred):**
+
+- The toy has no velocity noise and no real ringing. Stability must be
+  found live, stepwise.
+- The leader still moves freely until the latch engages (0.08 A of contact
+  force). That pre-latch travel is not reduced.
+
+**Offline replay on `_14` / `_16`:**
+
+- The replayed latch matches the live one on 99.99 % of samples.
+- The leader term has the felt force's sign 97–98 % of the time (the rest
+  is felt ≈ 0).
+- It is opposite to the follower hold 100 % of the time.
+
+**Live plan** (each step with the user's go; rigid presses; abort on a kick
+or buzz):
+
+1. K_L 2e-3, B_L 0.
+2. K_L 5e-3, B_L 1e-5.
+3. K_L 1e-2, B_L 1e-5.
+4. Then rigid vs sponge at the best step.
+
+Per run, check:
+
+- leader travel from 0.15 to 0.7 N;
+- leader velocity sign flips in contact (ringing);
+- the user's feel.
+
+---
+
+## 2026-10-29: Option A live step 1 — K_L 2e-3, B_L 0 (rigid): leader travel 34° → 4.5°
+
+- Run `_17`: discarded (the user forgot to spin the leader; no contact).
+- Run `logs/teleop_KVs3e-05_FB-1_18*`: operating point plus
+  `TELEOP_LEADER_K=2e-3 TELEOP_LEADER_K_MAX_A=0.4 TELEOP_LEADER_CONTACT_DAMP=0`.
+- New `leader_travel_eval.py` (per press, 0.15 → 0.7 N).
+
+| | Presses | Leader travel 0.15 → 0.7 N | Follower | Time | Leader-velocity flips per press | Leader position ripple std (detrended) | Felt ripple std |
+|---|---|---|---|---|---|---|---|
+| Rigid `_14` (no spring) | 19 | 382 counts (34°) | 3 | 214 ms | 1 (max 3) | 4.8 counts | 13.6 mA |
+| **Step 1 `_18`** | 9 | **50 counts (4.5°)** | 5 | 120 ms | **5 (max 9)** | **9.3 counts** | 11.9 mA |
+
+- **Leader travel cut 7.6×** (sim predicted 427 → 41).
+- **Ringing:**
+  - Position ripple is about 2× higher and the flips went 1 → 5, with no
+    consistent frequency (4–25 Hz).
+  - The felt-current ripple is unchanged at the median.
+  - The first two contacts had 47 mA felt ripple (a kick at first
+    contact?).
+- **The spring hits its 0.4 A clamp in 8 of 9 presses.** Above the cap
+  the total leader command is clamped at 0.8 A, so the leader still gives
+  way there.
+
+**User feel:** "the contact with the rigid object was the best it has
+ever been, very good." The only issue: "some minor oscillations (maybe
+like ringing) when I hold the leader still or when I do a quick tap."
+
+**Next:** step 1b. Keep K_L 2e-3 and add contact damping B_L 1e-5
+before going stiffer. Passivity needs B_L > K_L·T/2 = 2e-6 at
+T = 2 ms; the delay through err adds more. So 1e-5 is a 5× margin,
+and only about 10 mA at 1000 counts/s.
+
+---
+
+## 2026-10-29: Step 1b (contact damping) adopted; follower drift found; slipping position coupling built
+
+**Step 1b live** (`logs/teleop_KVs3e-05_FB-1_19*`): `TELEOP_LEADER_K=2e-3
+TELEOP_LEADER_K_MAX_A=0.4 TELEOP_LEADER_CONTACT_DAMP=1e-5`.
+
+- Leader travel 0.15 → 0.7 N: **20 counts (1.8°)** (step 1: 50; no
+  spring: 382).
+- Holds (2): leader wobble 0.8 counts, felt 2.5 mA.
+- Taps (8): 3 velocity flips in 300 ms (baseline 2). Thin data.
+- **User:** "it rang less and the taps are still as good."
+- **Adopted** (rigid contact "best it has ever been").
+
+**User:** "the follower still drifts when I hold [the leader] still."
+
+- **Measured on `_19`:** in leader-still stretches in free space the
+  follower creeps the same way. It moved −203 counts in 1.9 s and −142
+  in 0.8 s (about −150 to −230 counts/s), in 10–20-count stick-slip
+  steps, with iq_a_cmd about +5–10 mA.
+- **Cause (inferred):** Channel 1 matches velocities only. Nothing holds
+  position, so the arm sags under gravity (model grav_cos 13.5 mA, near
+  the Coulomb level) until friction catches it.
+- It predates option A. It is also why err ratchets to thousands of
+  counts over a run.
+
+**User's suggestion:** weak position following instead of a time-latched
+hold. Built as a **slipping** position coupling (`TELEOP_POS_K`,
+`TELEOP_POS_WINDOW`, logged `iq_a_pos`):
+
+    iq_a_pos = SIGN * POS_K * (err - pos_ref),  pos_ref clamped to err ± POS_WINDOW
+
+- The reference slides when the gap exceeds the window. Big
+  leader-ahead gaps (from pushing through the cap) are absorbed rather
+  than yanking. The pull is ≤ K·W.
+- **Offline open-loop replay on `_19`** (K 1e-3, W 50):
+  - in both drift stretches the term is +47 / +50 mA, opposing the drift;
+  - in free motion, median 40 mA (saturated 26 %, the follower's tracking
+    lag in that log);
+  - err spanned 3394 counts and was absorbed.
+- **First live try: K 1e-3, W 30** (≤ 30 mA, about 2× the gravity term).
+
+---
+
+## 2026-10-29: Slipping position coupling live (K 1e-3, W 30) — follower drift fixed
+
+Run `logs/teleop_KVs3e-05_FB-1_20*`: the step-1b operating point plus
+`TELEOP_POS_K=1e-3 TELEOP_POS_WINDOW=30`.
+
+| | `_19` (no position term) | `_20` (K 1e-3, W 30) |
+|---|---|---|
+| Follower drift in leader-still free-space stretches ≥ 0.8 s | median 24, **max 167 counts/s** (−203 counts in 1.9 s) | median 8, **max 18 counts/s** (moves with the leader's own ±10–25 counts) |
+| Free-motion felt iq_b_cmd rms (abs(vel_a) > 500) | 36.3 mA | 38.4 mA (unchanged) |
+| Leader travel 0.15 → 0.7 N | 20 counts | 31 counts |
+| Time to 0.7 N | 179 ms | 84 ms |
+| Velocity flips per press | 5 | 5 (one 1.9 s press: 19) |
+
+- **Per-contact wobble on `_20`:** leader 3–8 counts std, felt 5–20 mA.
+  The 19-flip press is a long press (6.4 counts, 11 mA), not stronger
+  ringing.
+- **In contact the position term sits at about −20 mA** (it pulls back
+  slightly). The approach lag fills the window, then the follower
+  catches up. Minor against 0.8 A.
+- **Position term in free motion:** median 18 mA.
+
+**User feel:** "it felt good. I didn't notice a change with the follower
+(maybe the numbers show something), but it felt good. There is still
+some drift, but much improved." **Adopted** into the operating point.
+If the residual drift matters, the next step is POS_K 2e-3.
+
+---
+
 ## Phase A summary (2026-10-20)
 
 | Step | Result | Key number |
@@ -4454,6 +4924,33 @@ against the code and the logs above.
 >   before the limit, circle-limited and non-forced period counts per
 >   frame, Tafter in use).
 > - DIAG flags are now RUN-only; bit6 = SET_PARAM rejected.
+>
+> **UPDATE 3 (2026-10-29, later): new operating point** (adds the leader
+> contact spring, contact damping and the slipping follower position
+> coupling, all in the 2026-10-29 entries):
+>
+> ```
+> TELEOP_POS_K=1e-3 TELEOP_POS_WINDOW=30 \
+> TELEOP_LEADER_K=2e-3 TELEOP_LEADER_K_MAX_A=0.4 TELEOP_LEADER_CONTACT_DAMP=1e-5 \
+> TELEOP_FRAME_QUEUE=1 TELEOP_SHADOW_TAU_ENV=1 TELEOP_FOLLOWER_MODEL=follower_model_arm3d.json \
+> TELEOP_FELT_SOURCE=tau_env TELEOP_K_F=1.0 TELEOP_FELT_DEADBAND_A=0.02 TELEOP_KB_DAMP=0.35e-5 \
+> TELEOP_HOLD_K=0.5e-3 TELEOP_HOLD_MAX_A=0.05 TELEOP_HOLD_RAMP_S=0.3 TELEOP_IQ1_MAX_A=0.8 \
+> TELEOP_LEADER_CAL=1 TELEOP_LOG_DIR=/dev/shm/teleop timeout -s INT 90 taskset -c 2,3 python3 teleop_test.py
+> ```
+>
+> - Rigid contact is "the best it has ever been". Leader travel from
+>   0.15 to 0.7 N went from 34° to about 2–3°. Follower drift with the
+>   leader still: 167 → 18 counts/s.
+> - The rigid-vs-soft feel test (failed before the leader spring) has
+>   NOT been redone yet.
+> - Option: step 2, K_L 5e-3.
+>
+> **UPDATE 2 (2026-10-29): CHANGE 7 result.** Raising Tafter made the
+> breakdown worse. **Tafter 400 fixes it** at both a bad (50°) and a good
+> (260°) angle: within 2 % to 0.8 A, std 26–29 mA. The Pi now sends 400
+> before every START (`can_interface.DEFAULT_TAFTER`, env `ESC_TAFTER`).
+> See the three 2026-10-29 entries. **Next:** scale check, then D1.
+> Steps 1–4 below are done.
 >
 > **NEXT STEPS, in order, each with the user's go:**
 >

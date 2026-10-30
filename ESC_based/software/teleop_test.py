@@ -516,6 +516,28 @@ HOLD_K = float(os.environ.get("TELEOP_HOLD_K", "0"))
 HOLD_MAX_A = float(os.environ.get("TELEOP_HOLD_MAX_A", "0.1"))
 HOLD_RAMP_S = float(os.environ.get("TELEOP_HOLD_RAMP_S", "0.3"))   # 0 = full strength at engage (HOLD runs 1-2)
 
+# Leader contact spring (option A, TEST_LOG 2026-10-29): on the hold's latch,
+# the leader gets -K * (leader past the contact point), clamped to MAX_A,
+# plus CONTACT_DAMP * vel_b while latched. Without it the leader travels
+# ~35-40 deg while the felt force builds, whatever the object, so rigid and
+# sponge feel alike. leader_spring_sim.py: no wind-up (the hand observer
+# sees the true hand torque). Needs HOLD_K. 0 = off.
+# Overrides: TELEOP_LEADER_K=2e-3 TELEOP_LEADER_K_MAX_A=0.4 TELEOP_LEADER_CONTACT_DAMP=1e-5
+LEADER_K = float(os.environ.get("TELEOP_LEADER_K", "0"))
+LEADER_K_MAX_A = float(os.environ.get("TELEOP_LEADER_K_MAX_A", "0.4"))
+LEADER_CONTACT_DAMP = float(os.environ.get("TELEOP_LEADER_CONTACT_DAMP", "0"))
+
+# Weak slipping position coupling on the follower (TEST_LOG 2026-10-29):
+# Channel 1 only matches velocities, so with the leader still the follower
+# sags under gravity in stick-slip steps (~15 deg in 1-2 s). Adds
+# SIGN * POS_K * (err - pos_ref) to the follower command, where pos_ref
+# slides so that |err - pos_ref| <= POS_WINDOW: small drifts are pulled
+# back, but the big leader-ahead gaps left by pushing through the current
+# cap are absorbed instead of yanking the follower (pull <= POS_K *
+# POS_WINDOW). 0 = off. Overrides: TELEOP_POS_K=1e-3 TELEOP_POS_WINDOW=50
+POS_K = float(os.environ.get("TELEOP_POS_K", "0"))
+POS_WINDOW = float(os.environ.get("TELEOP_POS_WINDOW", "50"))
+
 # Leader ripple + friction compensation (TEST_LOG 2026-10-26, leader_comp.py):
 # model file from friction_map.py sweeps; "" = off. Feed-forward d(th, v) on
 # iq_b_cmd, and (LEADER_COMP_OBS) i_b - d into the hand-torque observer.
@@ -567,12 +589,23 @@ def main():
         raise SystemExit("TELEOP_HOLD_K needs TELEOP_FELT_SOURCE=tau_env (contact is detected from tau_env)")
     if not (0.0 <= HOLD_K <= 2e-3 and 0.0 <= HOLD_MAX_A <= 0.3):
         raise SystemExit("TELEOP_HOLD_K must be in [0, 2e-3] A/count and TELEOP_HOLD_MAX_A in [0, 0.3] A")
+    if (LEADER_K or LEADER_CONTACT_DAMP) and not HOLD_K:
+        raise SystemExit("TELEOP_LEADER_K / TELEOP_LEADER_CONTACT_DAMP need TELEOP_HOLD_K (they use its contact latch)")
+    if not (0.0 <= LEADER_K <= 2e-2 and 0.0 <= LEADER_K_MAX_A <= 0.8 and 0.0 <= LEADER_CONTACT_DAMP <= 5e-5):
+        raise SystemExit("TELEOP_LEADER_K must be in [0, 2e-2] A/count, TELEOP_LEADER_K_MAX_A in [0, 0.8] A, "
+                         "TELEOP_LEADER_CONTACT_DAMP in [0, 5e-5] A/(count/s)")
     hold = ContactSpring(HOLD_K, HOLD_MAX_A, sign_=SIGN, ramp_s=HOLD_RAMP_S) if HOLD_K else None
+    leader_spring = bool(hold and (LEADER_K or LEADER_CONTACT_DAMP))
+    if not (0.0 <= POS_K <= 3e-3 and 0.0 < POS_WINDOW <= 200):
+        raise SystemExit("TELEOP_POS_K must be in [0, 3e-3] A/count and TELEOP_POS_WINDOW in (0, 200] counts")
     if not (0.0 <= LEADER_COMP_RIPPLE <= 1.5 and 0.0 <= LEADER_COMP_FRIC <= 1.0):
         raise SystemExit("TELEOP_LEADER_COMP_RIPPLE must be in [0, 1.5], TELEOP_LEADER_COMP_FRIC in [0, 1]")
     lcomp = (LeaderComp.load(LEADER_COMP_PATH, gain_ripple=LEADER_COMP_RIPPLE, gain_fric=LEADER_COMP_FRIC)
              if LEADER_COMP_PATH else None)
     iq_b_comp = 0.0
+    iq_b_spring = 0.0
+    iq_a_pos = 0.0
+    pos_ref = None
     if LEADER_CAL and not USE_FRAME_QUEUE:
         raise SystemExit("TELEOP_LEADER_CAL=1 needs TELEOP_FRAME_QUEUE=1")
     if LEADER_WARMUP_S and not LEADER_CAL:
@@ -679,6 +712,8 @@ def main():
         + (["tau_env", "tau_env_N"] if SHADOW_TAU_ENV else [])
         + (["iq_a_hold", "hold_e0"] if hold else [])
         + (["iq_b_comp"] if (lcomp or LEADER_CAL) else [])
+        + (["iq_b_spring"] if leader_spring else [])
+        + (["iq_a_pos"] if POS_K else [])
     )
 
     stale_count = 0
@@ -746,6 +781,9 @@ def main():
         print(f"Felt force: {FELT_SOURCE}" + (f", K_F {FELT_K_F:g}, dead band {FELT_DEADBAND_A * 1e3:g} mA"
                                               if FELT_SOURCE == "tau_env" else "")
               + (f"; contact spring K {HOLD_K:g} A/count, max {HOLD_MAX_A:g} A, ramp {HOLD_RAMP_S:g} s" if hold else "")
+              + (f"; leader contact spring K {LEADER_K:g} A/count, max {LEADER_K_MAX_A:g} A, "
+                 f"damp {LEADER_CONTACT_DAMP:g} A/(count/s)" if leader_spring else "")
+              + (f"; follower position coupling K {POS_K:g} A/count, window {POS_WINDOW:g} counts" if POS_K else "")
               + (f"; leader comp {'in-session cal' if LEADER_CAL else LEADER_COMP_PATH} (ripple x{LEADER_COMP_RIPPLE:g}, friction x{LEADER_COMP_FRIC:g}, "
                  f"observer {'on' if LEADER_COMP_OBS else 'off'})" if lcomp else "")
               + (f"; logging live to {LIVE_LOG_DIR}, moved to {LOG_DIR}/ at exit" if LIVE_LOG_DIR else ""))
@@ -931,7 +969,12 @@ def main():
             iq_a_d = SIGN * KD_SLOPE * accel_err_filt
             iq_a_ff = clamp(SIGN * FF_GAIN * tau_h_hat, FF_MAX_A)
             iq_a_hold = hold.update(now, err, tau_env, vel_a_filt) if hold else 0.0
-            iq_a_cmd_raw = clamp(iq_a_p + iq_a_d + iq_a_ff + iq_a_hold, IQ1_MAX_A)
+            if POS_K:
+                if pos_ref is None:
+                    pos_ref = err
+                pos_ref = min(max(pos_ref, err - POS_WINDOW), err + POS_WINDOW)
+                iq_a_pos = SIGN * POS_K * (err - pos_ref)
+            iq_a_cmd_raw = clamp(iq_a_p + iq_a_d + iq_a_ff + iq_a_hold + iq_a_pos, IQ1_MAX_A)
             iq_a_cmd_filt = (IQ_A_CMD_FILTER_ALPHA * iq_a_cmd_raw
                               + (1 - IQ_A_CMD_FILTER_ALPHA) * iq_a_cmd_filt)
             iq_a_cmd = iq_a_cmd_filt
@@ -943,6 +986,7 @@ def main():
                 or (now_wall - iq_a_time) > STALE_TIMEOUT_S
             )
             if iq_a_stale:
+                iq_b_spring = 0.0
                 iq_b_cmd = clamp(-KB_DAMP * vel_b_filt, IQ2_MAX_A)
             else:
                 iq_a_filt = IQ_FILTER_ALPHA * iq_a + (1 - IQ_FILTER_ALPHA) * iq_a_filt
@@ -950,7 +994,13 @@ def main():
                     x = tau_env
                     if FELT_DEADBAND_A > 0:
                         x = math.copysign(max(0.0, abs(x) - FELT_DEADBAND_A), x)
-                    iq_b_cmd = clamp(FELT_K_F * x - KB_DAMP * vel_b_filt + iq_b_comp, IQ2_MAX_A)
+                    if leader_spring and hold.active:
+                        iq_b_spring = (hold.leader(LEADER_K, LEADER_K_MAX_A)
+                                       - LEADER_CONTACT_DAMP * vel_b_filt)
+                    else:
+                        iq_b_spring = 0.0
+                    iq_b_cmd = clamp(FELT_K_F * x - KB_DAMP * vel_b_filt + iq_b_comp + iq_b_spring,
+                                     IQ2_MAX_A)
                 else:
                     iq_b_cmd = clamp(FEEDBACK_GAIN * iq_a_filt - KB_DAMP * vel_b_filt, IQ2_MAX_A)
             b.send_set_iq(iq_b_cmd)
@@ -993,6 +1043,8 @@ def main():
                    if SHADOW_TAU_ENV else [])
                 + ([f"{iq_a_hold:.4f}", f"{hold.e0:.0f}" if hold.active else ""] if hold else [])
                 + ([f"{iq_b_comp:.4f}"] if lcomp else [])
+                + ([f"{iq_b_spring:.4f}"] if leader_spring else [])
+                + ([f"{iq_a_pos:.4f}"] if POS_K else [])
             )
             rows_logged += 1
 

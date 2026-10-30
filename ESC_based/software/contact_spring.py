@@ -55,6 +55,7 @@ class ContactSpring:
         self.s = 0
         self.below_since = None
         self.i = 0.0
+        self.d = 0.0
 
     def update(self, t, err, tau_env, vel_a):
         """t in seconds (any monotonic clock). Returns the hold current (A)."""
@@ -75,10 +76,21 @@ class ContactSpring:
         if not self.active:
             self.i = 0.0
             return 0.0
-        x = self.s * self.sign_ * self.k * (err - self.e0)
+        self.d = err - self.e0
+        x = self.s * self.sign_ * self.k * self.d
         ramp = min(1.0, (t - self.t_on) / self.ramp_s) if self.ramp_s > 0 else 1.0
         self.i = self.s * ramp * min(max(x, 0.0), self.i_max)
         return self.i
+
+    def leader(self, k, i_max):
+        """Leader-side spring on the same latch (option A, TEST_LOG 2026-10-29):
+        resists the leader moving past where contact began, so the leader
+        stops about where the follower stops and the object's stiffness is
+        felt instead of the coupling's. Opposite sign to the follower's push
+        (the felt force's sign), no ramp. Call after update()."""
+        if not self.active:
+            return 0.0
+        return -self.s * min(max(self.s * self.sign_ * k * self.d, 0.0), i_max)
 
 
 if __name__ == "__main__":
