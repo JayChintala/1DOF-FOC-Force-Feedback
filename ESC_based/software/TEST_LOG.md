@@ -3,9 +3,20 @@
 Running log of the Phase A–D plan, run on the Pi against the ESC_based
 firmware on both B-G431B-ESC1 boards. Newest entries at the bottom.
 
-## TL;DR (updated 2026-10-29: Tafter 400 fixes the >0.55 A current breakdown; leader contact spring + follower position coupling = new operating point; see 0c UPDATE 3)
+## TL;DR (updated 2026-11-15: operating point re-confirmed after a Pi restart, runs 21/22. Previous: 2026-10-29, Tafter 400 fixes the >0.55 A current breakdown; leader contact spring + follower position coupling = new operating point; see 0c UPDATE 3)
 
-**Status:** C1–C3 done; holds fixed (contact spring); leader ripple largely compensated (in-session cal). Force calibrated at the tip (1.044 N/A below ~0.45 A); measured Iq breaks down above ~0.55 A at some angles (firmware CHANGE 7 next). Firmware 75a893b (CHANGES 1–6) flashed. **See "0c. RESUME HERE".**
+> **START HERE, before running anything.** If you were handed the
+> "sensorless force-feedback improvement plan" brief: that is the
+> *original plan*, not the current state. Phases A-C are largely done.
+> Read this TL;DR and **"0c. RESUME HERE"** first, and run from
+> `ESC_based/software/`, not `software/`.
+>
+> `software/teleop_test.py` is the **A1 baseline** (the pre-Phase-C echo
+> path). Running it feels markedly worse and is not a regression — see
+> the 2026-11-15 entry, where a session lost most of a day to exactly
+> this.
+
+**Status:** C1–C3 done; holds fixed (contact spring); leader ripple largely compensated (in-session cal). **Force calibrated at the tip: 1.058 N/A, R² 0.999, LINEAR TO 0.8 A (2026-11-15) — the >0.55 A measured-Iq breakdown is fixed by Tafter 400, which the Pi now sends before every START.** Firmware b26c643 (CHANGE 7) flashed. Operating point re-confirmed after a Pi restart (runs 21–24); rigid vs foam 9.7× on the follower. **Next: D1.** See "0c. RESUME HERE".
 
 | Step | Status |
 |---|---|
@@ -4879,6 +4890,244 @@ Run `logs/teleop_KVs3e-05_FB-1_20*`: the step-1b operating point plus
 (maybe the numbers show something), but it felt good. There is still
 some drift, but much improved." **Adopted** into the operating point.
 If the residual drift matters, the next step is POS_K 2e-3.
+
+---
+
+## 2026-11-15: Post-restart confirmation (runs 21, 22) — PASS; and a wasted-session warning
+
+**Context.** The Pi was restarted this session. A new Claude session was
+handed the *original* plan brief (the one this log's Handoff calls "the
+user's sensorless force-feedback plan") and worked from it directly,
+without reading this log first. It therefore re-ran Phase A against
+`../../software/teleop_test.py` — which, per the script table above, is
+the **A1 baseline copy**, i.e. the pre-Phase-C echo path. The user asked
+"why does it feel worse today than before". That was the reason.
+
+**Read this log's TL;DR and "0c. RESUME HERE" before running anything.**
+The brief is a plan, not a status; most of it is already done.
+
+### What ran
+
+```
+# 1. passive
+taskset -c 2,3 python3 bus_check.py
+# 2. 0 A
+taskset -c 2,3 python3 zero_iq_check.py
+# 3. operating point (0c UPDATE 3), twice, 90 s each
+TELEOP_POS_K=1e-3 TELEOP_POS_WINDOW=30 \
+TELEOP_LEADER_K=2e-3 TELEOP_LEADER_K_MAX_A=0.4 TELEOP_LEADER_CONTACT_DAMP=1e-5 \
+TELEOP_FRAME_QUEUE=1 TELEOP_SHADOW_TAU_ENV=1 TELEOP_FOLLOWER_MODEL=follower_model_arm3d.json \
+TELEOP_FELT_SOURCE=tau_env TELEOP_K_F=1.0 TELEOP_FELT_DEADBAND_A=0.02 TELEOP_KB_DAMP=0.35e-5 \
+TELEOP_HOLD_K=0.5e-3 TELEOP_HOLD_MAX_A=0.05 TELEOP_HOLD_RAMP_S=0.3 TELEOP_IQ1_MAX_A=0.8 \
+TELEOP_LEADER_CAL=1 TELEOP_LOG_DIR=/dev/shm/teleop timeout -s INT 90 taskset -c 2,3 python3 teleop_test.py
+```
+
+### Results
+
+`bus_check.py`: **OK**. Both boards TELEM 1000/s, DBG 10/s, 0 µs-gaps
+outside 950–1050, idle Iq +0.003/+0.004 A (calibrated), `throttled=0x0`.
+No reset. DBG status 128 = latched trip 4 from the earlier baseline runs.
+
+`zero_iq_check.py`: **PASS**. RUN asserted 0.05 s after START on both —
+not the 2 s alignment, because neither board had power-cycled. In RUN at
+0 A: A mean −0.0000 A std 6.5 mA; B mean −0.0000 A std 4.7 mA.
+Log: `logs/precheck_zero_iq.csv`.
+
+| Metric | Run 21 | Run 22 | Target | |
+|---|---|---|---|---|
+| Free-space RMS `iq_b_cmd` | 0.0262 A | 0.3953 A (heavy contact) | ≤ 0.035 A | run 21 **PASS** |
+| Free floor of `tau_env` (p20 \|.\|) | — | **10.2 mA** | C1 recorded 10.3 mA | **match** |
+| loop_dt p95 | 2.070 ms | 2.070 ms | ≤ 2.1 ms | **PASS** |
+| loop_dt p99 / max | 2.180 / 73.96 ms | 2.200 / 74.23 ms | — | see below |
+| B1 frames A/B | 57244 / 57224 | 57304 / 57291 | 1000/s | **PASS** |
+| Frame gaps outside 1000±50 µs | 0 | 0 | 0 | **PASS** |
+| Missing frames | 0 | 0 | 0 | **PASS** |
+| Peak contact force | — | 0.84 N | ceiling 0.835 N | current-limited |
+
+Logs: `logs/teleop_KVs3e-05_FB-1_21.csv` (+ `_frames`, `_cal`),
+`logs/teleop_KVs3e-05_FB-1_22.csv` (+ `_frames`, `_cal`).
+
+**User verdict: "matches Oct 29".** The operating point survived the
+restart unchanged.
+
+**Rise time: not measured.** Run 22 is continuous pressing, not discrete
+taps; an auto-detector returned 57 "onsets", median 48 ms, 2–162 ms, and
+was re-triggering inside single presses (several share the same 0.81–0.84 N
+peak). A dedicated tap log via `--taps` is still needed to compare against
+the 4 ms on record.
+
+### New observations
+
+- **A recurring ~74 ms loop stall**, in both runs (73.96 and 74.23 ms),
+  with everything else inside p95. Not the old SCHED_FIFO cause: `ulimit -r`
+  is 50 via `/etc/security/limits.d/99-rtprio.conf`, and
+  `os.sched_setscheduler(SCHED_FIFO)` is granted. Cause unknown.
+- **RT-priority fix is persistent** and survived the reboot (it is a
+  limits.d file, not a session setting).
+- **Independent confirmation of the follower plant gain.** A2 re-run
+  (5 runs, old-tree script repaired) gave **G_A = 4,081,941, SE 3.4 %**,
+  against `follower_model_arm3d.json`'s fitted **3,847,031** — **+6.1 %**.
+  This confirms the fitted model still holds and that the TL;DR's
+  G_A = 9.025e6 is stale (it predates the 3D-printed arm). G_B came out
+  8.877e6 vs 9.672e6 on record, −8.2 %.
+- **The follower saturates at the 0.8 A ceiling** in ordinary rigid
+  presses (peak 0.84 N vs the 0.835 N ceiling), so contact force is
+  current-limited, as the C3 note says.
+
+### Corrections to claims made earlier in this session
+
+All four were already in this log's Hazards list:
+
+- "367-count encoder glitch, cause unknown" → the documented 200–500 count
+  jump at the end of the first START's 2 s alignment.
+- "Idle Iq +28.3/−21.1 A, the brief is wrong" → documented "idle Iq is
+  garbage (about ±25 A) until a board has been STARTed once after power-up".
+- "Motors never reach RUN, START may be broken" → the same 2 s alignment;
+  SET_IQ is dropped until it finishes. The check had aborted at 3.05 s.
+- "SET_IQ resend missing in plant_gain_test.py" → already fixed in this
+  directory's ported copy; the bug was only in the old `software/` tree.
+
+Also: the measured Iq quantum of 0.11477 mA (= 29.4/256) was read as
+evidence against B4's premise. It is the opposite — **B4 is already
+flashed**, and the at-rest std measured this session (9.2/3.1 mA) against
+the pre-B4 0.030–0.043 A is consistent with B4's recorded 9.7× improvement.
+
+---
+
+## 2026-11-15: Rigid vs foam at the restored operating point (runs 22, 23) — D2 9.7× PASS (follower); felt difference compressed by the 0.84 N ceiling
+
+Closes part of the Oct 29 open item "rigid-vs-soft feel test not redone
+since the leader spring". Same operating-point command as the entry above.
+Logs: `logs/teleop_KVs3e-05_FB-1_22.csv` (rigid), `logs/teleop_KVs3e-05_FB-1_23.csv`
+(foam), both with `_frames` and `_cal`.
+
+### Stiffness (`stiffness_eval.py … --side -1`; both users pressed on the −side)
+
+| | presses | median travel | k |
+|---|---|---|---|
+| Rigid (22) | 8 | 3 counts (0.36 mm) | **1.62 N/mm** |
+| Foam (23) | 15 | 28 counts (3.33 mm) | **0.17 N/mm** |
+| | | | **ratio 9.7× — D2 PASS (≥5×)** |
+
+Consistent with the Oct 29 preview ("about 10×"). Rigid travel of 2–7
+counts is near encoder resolution, so 1.62 N/mm is a **lower bound** and
+the true ratio is ≥ 9.7×.
+
+Rigid contact position repeats to ±2 counts (encoder 7266–7270 over 8
+presses). The foam's contact point wanders (2367 → 2628) as it compresses
+— itself a soft-material signature. Foam k spread is wide (0.05–0.64
+N/mm); the two deepest presses travelled 104 and 72 counts (12.4, 8.6 mm).
+
+### Why the FELT difference is only "somewhat" (user)
+
+The user's explanation — "a rather rigid foam, so the follower bottoms out
+in force quickly" — is confirmed by the logs:
+
+| | in contact | at the force ceiling | follower current clamped | median felt `iq_b_cmd` |
+|---|---|---|---|---|
+| Rigid (22) | 27.5 % of run | **65.2 %** of contact | 65.1 % | **800 mA** |
+| Foam (23) | 42.8 % of run | **50.1 %** of contact | 57.1 % | **800 mA** |
+
+`|F|` during contact is nearly identical between materials — rigid p50 0.81
+/ p90 0.83 / max 0.84 N, foam p50 0.79 / p90 0.82 / max 0.84 N. **The felt
+current is pinned at the 800 mA clamp for the median of contact time in
+both runs**, so for more than half of every press the leader delivers the
+same thing regardless of material.
+
+**The discriminating information is in travel, not force**, and the felt
+channel carries force. That is the mechanism behind the weak feel, not an
+estimator problem: the follower measures 9.7×, and the hand gets a
+saturated, material-independent plateau.
+
+Three ways out, cheapest first:
+
+1. **Press more gently** (peak about 0.4 N, below the ceiling) so the force
+   signal stays informative. Free, untested. **(inferred)**
+2. A genuinely softer sample, so more travel happens below the ceiling.
+3. Raise the ceiling above 0.8 A — but the >0.55 A current-sensing
+   breakdown sits there, and Tafter 400 is only verified to 0.8 A.
+
+---
+
+## 2026-11-15: Scale check redone with Tafter 400 — PASS, 1.058 N/A linear to 0.8 A (the >0.55 A breakdown is gone)
+
+The step 4 the 0c handoff asked for ("redo the scale check, force linear
+to 0.8 A at about 1.044 N/A"), now that Tafter 400 ships by default.
+
+```
+python3 b7_force_cal.py --sign +1 --log logs/B7_cal_20261115_arm3d.csv
+python3 b7_force_cal.py --fit logs/B7_cal_20261115_arm3d.csv --grams 2,8,18,31,47,61,82
+```
+
+Logs: `logs/B7_cal_20261115_arm3d.csv` (+ `_diag.csv`, 686 DIAG frames).
+A first identical run is kept as `..._run1_noreadings.csv` (the user did
+not read the scale; its current-tracking data is still valid and matches
+the second run to 4 decimals at every level).
+
+### Current tracking — the Tafter 400 verification
+
+| Level | cmd | iq_meas (std) | error | travel |
+|---|---|---|---|---|
+| 1 | 0.05 | 0.0496 (3.8 mA) | −0.8 % | 0 cnt |
+| 2 | 0.10 | 0.0992 (3.8 mA) | −0.8 % | 0 cnt |
+| 3 | 0.20 | 0.1983 (3.9 mA) | −0.9 % | 0 cnt |
+| 4 | 0.30 | 0.2993 (3.7 mA) | −0.2 % | 0 cnt |
+| 5 | 0.45 | 0.4479 (5.5 mA) | −0.5 % | 0 cnt |
+| 6 | 0.60 | 0.5973 (11.3 mA) | −0.5 % | 0 cnt |
+| 7 | 0.80 | 0.7887 (**30.0 mA**) | −1.4 % | 0 cnt |
+
+**Within 2 % of command to 0.8 A: PASS.** std ≤ 25 mA: **FAIL at level 7
+only** (30.0 mA; 34.9 mA on the first run). Matches the 26–29 mA on record
+from 2026-10-29, so that is the real full-scale behaviour, not drift.
+0 counts of travel at every level — the arm was solidly loaded.
+
+### Force fit
+
+| | slope | intercept | R² |
+|---|---|---|---|
+| All 7 levels | **1.0582 N/A** | −0.0261 N | **0.99894** |
+| Low 5 only (≤0.45 A) | 1.1111 N/A | −0.0353 N | 0.99895 |
+
+- **vs the 2026-10-28 reference 1.044 N/A: +1.4 %.** Calibration is stable.
+- **R² 0.99894 ≥ 0.99 → PASS**, now across the whole range, not just
+  below 0.45 A.
+- Max residual **13.4 mN (1.4 g)**, at the scale's 1 g resolution.
+  Against D1's ≤ max(0.05 N, 10 %): **PASS**, 3.7× margin.
+- Level 7 residual is −4.3 mN, the best-fitting point in the set. **The
+  >0.55 A breakdown is gone** (it used to read low with real current
+  overshooting to ≈0.93 A at a 0.8 A command).
+
+**Caveat — a mild ~5 % softening above 0.45 A.** Fitting only the low five
+levels over-predicts the top two: level 6 −5.0 %, level 7 −4.6 %.
+Monotonic and small, nothing like the old breakdown, and the whole-range
+fit absorbs it. If D1 needs better than 5 % at the top end, use a
+two-segment fit.
+
+`b7_force_cal.py --fit` prints **FAIL** here: it compares to
+`EXPECT_N_PER_A = 3.3` (line 47), the old 2 cm-link nominal, which does
+not apply to the 3D-printed arm. Judge against 1.044 N/A instead, or
+change that constant.
+
+### Fixture note (cost two aborted runs)
+
+The arm must be **preloaded against the scale before any current**. Placed
+by hand it was free-swinging, and 0.05 A moved it ~30 counts in 30 ms in
+*either* sign (Oct 25, when it worked: 0 counts over 5001 samples at the
+same level). `ABORT_VEL` then fired on single-sample velocity and the run
+died at level 1 on both signs. What worked: drive the follower onto the
+scale **through the leader** in teleop, stop, let it settle (it ended
+374 counts from where the leader held it), tare, then run. **Sign +1**
+presses into the scale with this geometry — determined from the teleop
+log (`iq_a_cmd` +0.65 A, 100 % positive during quasi-static contact), not
+by guessing.
+
+Separately, `ABORT_VEL = 2000` counts/s is tested on a **single 1 ms
+sample**, where one count of jitter is 1000 counts/s, so it has only two
+counts of headroom. A settle-phase abort was triggered this way with no
+current applied and 28 counts of total drift. **(inferred: a 3–5 sample
+median would be more robust; not changed.)**
+
+**Next:** D1.
 
 ---
 
