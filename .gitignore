@@ -99,3 +99,6 @@ software/__pycache__/
 
 # PropHand (separate project, not part of this repo)
 PropHand Code/
+
+# flash_and_verify.ps1 run logs
+ESC_based/STM32/flash_logs/

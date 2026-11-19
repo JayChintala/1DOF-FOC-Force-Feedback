@@ -5273,6 +5273,53 @@ resonance.
 
 ---
 
+## 2026-11-18: Host-PC build/flash pipeline (JayPC) + a fifth "both ESCs won't START" event
+
+**What ran:** first session driven from JayPC (Windows) instead of the Pi.
+New script `ESC_based/STM32/flash_and_verify.ps1`. It builds both node
+configs headless (CubeIDE's generated makefiles + bundled toolchain), checks
+that `Debug_ESC2` defines `CAN_NODE_ID=1` and `Debug` doesn't, flashes each
+board by ST-LINK serial (`-v -rst`), then runs `bus_check.py` on the Pi over
+SSH and parses its per-node lines. `bus_check.py`'s exit code is always 1
+straight after a flash (fresh boards read RESET), so the script doesn't use it.
+
+- **Build:** clean build is about 5 s per config with 0 warnings. **The
+  rebuilt images are byte-identical to the ELFs from the b26c643 flash**
+  (objcopy binary compare), so today's flashes changed nothing on the boards.
+- **Board mapping, confirmed on the bus:** with both boards calibrated,
+  `-Board ESC1` (SN …073237) reset node A only; node B stayed calibrated.
+  A flash of both boards can't tell the serials apart (both reset either way).
+- **Final state:** firmware b26c643 on both, both re-aligned
+  (`zero_iq_check.py` PASS, RUN std A 8.2 mA, B 6.5 mA), both calibrated.
+
+**Event: both ESCs ignored START (fifth shared-power event).** The first
+`zero_iq_check.py` today: "RUN bit never seen" on A and B. The encoder and
+Iq were flat for the whole 4 s (no alignment, nothing energized); CALIB
+offsets were all 0. This is the same signature as 2026-10-25 B7 attempt 1
+(MCSDK latched fault, START ignored, no fault code on CAN). About 50
+minutes later, without a firmware change, A had come back calibrated
+(trip 4) and B was still RESET; the retry PASSed. What changed in between
+is unknown (inferred: the supply or connectors recovered, or the boards
+were power-cycled).
+
+| Date | Event | Motor activity |
+|---|---|---|
+| 2026-11-18 | both ignored START (latched fault, inferred), recovered later | none |
+
+**Pi 5 V:** `throttled=0x50000` all session, with `Undervoltage detected!`
+at about 970, 1636, 2461, 3033, 3094 and 6081 s after boot. It was 0x0 on
+10-26 and 11-15, so this is new. Check the Pi supply.
+
+**Still open (firmware, via FIRMWARE_CHANGES.txt):** call
+`MC_AcknowledgeFaultMotor1()` before `MC_StartMotor1()` in the CAN START
+handler (`can_driver.c:421`) and put `MC_GetOccurredFaultsMotor1()` in DBG,
+so a latched fault can be read over CAN instead of showing as a silent "no RUN".
+
+Logs: `ESC_based/STM32/flash_logs/` on JayPC (git-ignored);
+`logs/precheck_zero_iq.csv` on the Pi (the last run overwrites it).
+
+---
+
 ## Phase A summary (2026-10-20)
 
 | Step | Result | Key number |
