@@ -23,6 +23,22 @@
 #define ENC_MODULUS ((int32_t)M1_PULSE_NBR + 1)
 #define ENC_HALF (ENC_MODULUS / 2)
 
+#if (CAN_NODE_ID > 1) || (CAN_PEER_NODE_ID > 1)
+#error "P2P plant table (COUPLE_P2P_G_NODE*) only covers nodes 0 and 1"
+#endif
+#define P2P_G_OF(node) ((node) == 0 ? COUPLE_P2P_G_NODE0 : COUPLE_P2P_G_NODE1)
+#define P2P_FC_OF(node) ((node) == 0 ? COUPLE_P2P_FC_NODE0 : COUPLE_P2P_FC_NODE1)
+#define P2P_TS_S 1.0e-3f /* own tick; the peer's dt comes from its stamps */
+#define TWO_PI_F 6.28318531f
+
+/* One disturbance observer (couple_ctrl.h, "P2P mode"): z is the low-passed
+   (i + k*v), k = g/G, and d = z - k*v is the disturbance in amps. */
+typedef struct {
+  float z;
+  float d;
+  bool valid;
+} Dob_t;
+
 typedef struct {
   /* Tuning: couple_ctrl.h defaults until the Pi sends its own. */
   float kp;
@@ -46,6 +62,25 @@ typedef struct {
   uint32_t peer_arrival_us;
   float peer_vel;
   uint32_t peer_age_us;
+
+  /* P2P tuning (SET_PARAM units, as received) and what follows from it. */
+  int32_t p2p_wn_dhz;
+  int32_t p2p_zeta_pct;
+  int32_t p2p_kf_pct;
+  int32_t p2p_g;
+  int32_t p2p_fric_pct;
+  float p2p_kp;   /* wn^2, 1/s^2 */
+  float p2p_kv;   /* 2*zeta*wn, 1/s */
+  float p2p_kf;   /* counts/s^2 per A */
+  float p2p_comp; /* 0..1.5 */
+
+  /* P2P observers. Iq in the encoder frame (COUPLE_TORQUE_SIGN applied). */
+  float own_iq;  /* this tick's 1 ms mean */
+  float peer_iq; /* from the latest peer TELEM */
+  Dob_t dob_own;
+  Dob_t dob_peer;
+  float f_own;  /* RFOB, last P2P tick: external force, amps */
+  float f_peer;
 
   /* req_mode is what was asked for; engaged says whether the law has
      latched its offsets and is actually driving Iq. */
@@ -76,7 +111,53 @@ static Couple_State_t s_couple = {
     .iq_max = COUPLE_DEFAULT_IQ_MAX_A,
     .peer_age_us = UINT32_MAX,
     .req_mode = COUPLE_MODE_OFF,
+    .p2p_wn_dhz = COUPLE_P2P_WN_DHZ_DEFAULT,
+    .p2p_zeta_pct = COUPLE_P2P_ZETA_PCT_DEFAULT,
+    .p2p_kf_pct = COUPLE_P2P_KF_PCT_DEFAULT,
+    .p2p_g = COUPLE_P2P_DOB_G_DEFAULT,
+    .p2p_fric_pct = COUPLE_P2P_FRIC_PCT_DEFAULT,
+    /* p2p_kp/kv/kf/comp are derived on the first tick (P2PDerive()). */
 };
+static bool s_p2pDerived = false;
+
+/* Recomputes the P2P gains from the SET_PARAM values. */
+static void P2PDerive(void) {
+  float const wn = TWO_PI_F * 0.1f * (float)s_couple.p2p_wn_dhz;
+  s_couple.p2p_kp = wn * wn;
+  s_couple.p2p_kv = 2.0f * 0.01f * (float)s_couple.p2p_zeta_pct * wn;
+  s_couple.p2p_kf = 0.01f * (float)s_couple.p2p_kf_pct * COUPLE_P2P_KF_REF;
+  s_couple.p2p_comp = 0.01f * (float)s_couple.p2p_fric_pct;
+  s_p2pDerived = true;
+}
+
+/* Restarts an observer at rest-consistent state: d = i. */
+static void DobReset(Dob_t* o, float iq, float vel, float g_plant) {
+  float const k = (float)s_couple.p2p_g / g_plant;
+  o->z = iq + k * vel;
+  o->d = iq;
+  o->valid = true;
+}
+
+/* One observer step over dt seconds. Forward Euler, as in p2p_sim.py; the
+   gain is capped at 1 so a long gap cannot overshoot. */
+static void DobStep(Dob_t* o, float iq, float vel, float g_plant, float dt) {
+  float const g = (float)s_couple.p2p_g;
+  float const k = g / g_plant;
+  if (!o->valid) {
+    DobReset(o, iq, vel, g_plant);
+    return;
+  }
+  float a = g * dt;
+  if (a > 1.0f) {
+    a = 1.0f;
+  }
+  o->z += a * (iq + k * vel - o->z);
+  o->d = o->z - k * vel;
+}
+
+static bool IqSane(float iq) {
+  return (iq <= COUPLE_P2P_IQ_SANE_A) && (iq >= -COUPLE_P2P_IQ_SANE_A);
+}
 
 /* The build uses -Ofast, which implies -ffinite-math-only: GCC may fold
  * isfinite() to true and assume NaN never reaches a comparison. Values off
@@ -159,6 +240,19 @@ static void UpdateOwn(const CAN_TickSample_t* s) {
   }
   s_couple.own_pos = pos;
   s_couple.own_us = s->us;
+
+  /* P2P: this shaft's observer, on the current that drove the last 1 ms --
+     the same interval the velocity above was differenced over. Run in every
+     mode (it costs nothing) but only trusted from engagement, which resets
+     it: before START the Iq readback is meaningless. */
+  float const iq = IsFinite(s->iq_a) ? COUPLE_TORQUE_SIGN * s->iq_a : 1.0e9f;
+  s_couple.own_iq = iq;
+  if (IqSane(iq)) {
+    DobStep(&s_couple.dob_own, iq, s_couple.own_vel, P2P_G_OF(CAN_NODE_ID),
+            (dt_us > 0u) ? (float)dt_us * 1.0e-6f : P2P_TS_S);
+  } else {
+    s_couple.dob_own.valid = false;
+  }
 }
 
 static void UpdatePeer(const CAN_TickSample_t* s) {
@@ -193,6 +287,20 @@ static void UpdatePeer(const CAN_TickSample_t* s) {
     if (gap) {
       s_couple.peer_vel = 0.0f;
     }
+
+    /* P2P: the PEER's observer, run here on its own TELEM (1 ms mean Iq +
+       encoder), stepped once per frame over the peer's own dt. A gap, or a
+       reading no RUN-state board could produce, restarts it. */
+    float const piq = IsFinite(p.iq_a) ? COUPLE_TORQUE_SIGN * p.iq_a : 1.0e9f;
+    s_couple.peer_iq = piq;
+    if (gap || !IqSane(piq)) {
+      s_couple.dob_peer.valid = false;
+    } else {
+      uint16_t const pdt_us = (uint16_t)(p.ts_us - s_couple.peer_ts);
+      DobStep(&s_couple.dob_peer, piq, s_couple.peer_vel,
+              P2P_G_OF(CAN_PEER_NODE_ID),
+              (pdt_us > 0u) ? (float)pdt_us * 1.0e-6f : P2P_TS_S);
+    }
     s_couple.peer_ts = p.ts_us;
     s_couple.peer_arrival_us = p.arrival_us;
     s_couple.peer_seq = p.seq;
@@ -202,8 +310,20 @@ static void UpdatePeer(const CAN_TickSample_t* s) {
       s_couple.peer_valid ? (s->us - s_couple.peer_arrival_us) : UINT32_MAX;
 }
 
+/* Nominal Coulomb friction at velocity vel, linear inside +-V0. */
+static float P2PFriction(float fc, float vel) {
+  float x = vel * (1.0f / COUPLE_P2P_FRIC_V0_CNT_S);
+  if (x > 1.0f) {
+    x = 1.0f;
+  } else if (x < -1.0f) {
+    x = -1.0f;
+  }
+  return fc * x;
+}
+
 static void RunLaw(bool peer_fresh) {
-  bool const peer = (s_couple.req_mode == COUPLE_MODE_PEER);
+  bool const p2p = (s_couple.req_mode == COUPLE_MODE_P2P);
+  bool const peer = (s_couple.req_mode == COUPLE_MODE_PEER) || p2p;
   if (peer && !peer_fresh) {
     Disengage(COUPLE_TRIP_PEER_TIMEOUT);
     return;
@@ -237,9 +357,32 @@ static void RunLaw(bool peer_fresh) {
   }
 
   float const iq_max = fminf(s_couple.iq_max, COUPLE_IQ_MAX_CEILING_A);
-  float const raw = -COUPLE_TORQUE_SIGN *
-                    (s_couple.kp * err_f + s_couple.kd * derr +
-                     s_couple.kd_local * s_couple.own_vel);
+  float raw;
+  if (p2p) {
+    /* Both observers must be live on sane readings: a peer that dropped
+       out of RUN reads garbage Iq, and its "force" would be anything. */
+    if (!s_couple.dob_own.valid || !s_couple.dob_peer.valid ||
+        !IqSane(s_couple.peer_iq) || !IqSane(s_couple.own_iq)) {
+      Disengage(COUPLE_TRIP_OBS_RANGE);
+      return;
+    }
+    float const c = s_couple.p2p_comp;
+    s_couple.f_own =
+        -(s_couple.dob_own.d -
+          c * P2PFriction(P2P_FC_OF(CAN_NODE_ID), s_couple.own_vel));
+    s_couple.f_peer =
+        -(s_couple.dob_peer.d -
+          c * P2PFriction(P2P_FC_OF(CAN_PEER_NODE_ID), s_couple.peer_vel));
+    float const ddx =
+        0.5f * (s_couple.p2p_kf * (s_couple.f_own + s_couple.f_peer) -
+                s_couple.p2p_kp * err_f - s_couple.p2p_kv * derr);
+    raw = COUPLE_TORQUE_SIGN *
+          (ddx / P2P_G_OF(CAN_NODE_ID) + s_couple.dob_own.d);
+  } else {
+    raw = -COUPLE_TORQUE_SIGN *
+          (s_couple.kp * err_f + s_couple.kd * derr +
+           s_couple.kd_local * s_couple.own_vel);
+  }
   float iq = raw;
   if (iq > iq_max) {
     iq = iq_max;
@@ -273,6 +416,9 @@ static void RunDirect(const CAN_TickSample_t* s) {
 }
 
 void Couple_Tick(const CAN_TickSample_t* s) {
+  if (!s_p2pDerived) {
+    P2PDerive();
+  }
   UpdateOwn(s);
   UpdatePeer(s);
 
@@ -295,13 +441,28 @@ void Couple_Tick(const CAN_TickSample_t* s) {
 
   if (!s_couple.engaged && (s_couple.req_mode != COUPLE_MODE_OFF)) {
     bool settled = fabsf(s_couple.own_vel) <= COUPLE_ENGAGE_VEL_MAX_CNT_S;
-    if (s_couple.req_mode == COUPLE_MODE_PEER) {
+    bool const p2p = (s_couple.req_mode == COUPLE_MODE_P2P);
+    if ((s_couple.req_mode == COUPLE_MODE_PEER) || p2p) {
       settled = settled && peer_fresh &&
                 (fabsf(s_couple.peer_vel) <= COUPLE_ENGAGE_VEL_MAX_CNT_S);
+    }
+    if (p2p) {
+      /* Wait for a peer whose Iq readback is a RUN-state current. */
+      settled = settled && IqSane(s_couple.peer_iq) && IqSane(s_couple.own_iq);
     }
     if (settled) {
       s_couple.own0 = s_couple.own_pos;
       s_couple.peer0 = s_couple.peer_pos;
+      if (p2p) {
+        /* Start both observers from this still state, so nothing read
+           before RUN leaks into the first output. */
+        DobReset(&s_couple.dob_own, s_couple.own_iq, s_couple.own_vel,
+                 P2P_G_OF(CAN_NODE_ID));
+        DobReset(&s_couple.dob_peer, s_couple.peer_iq, s_couple.peer_vel,
+                 P2P_G_OF(CAN_PEER_NODE_ID));
+        s_couple.f_own = 0.0f;
+        s_couple.f_peer = 0.0f;
+      }
       s_couple.engaged = true;
     }
   }
@@ -343,7 +504,8 @@ void Couple_RequestMode(uint8_t mode, uint8_t flags) {
     }
     return;
   }
-  if ((mode != COUPLE_MODE_HOLD) && (mode != COUPLE_MODE_PEER)) {
+  if ((mode != COUPLE_MODE_HOLD) && (mode != COUPLE_MODE_PEER) &&
+      (mode != COUPLE_MODE_P2P)) {
     return;
   }
 
@@ -376,7 +538,8 @@ void Couple_GetStatus(Couple_Status_t* out) {
   if (s_couple.req_mode != COUPLE_MODE_OFF) {
     flags |= (uint8_t)COUPLE_STATUS_REQUESTED;
   }
-  if (s_couple.req_mode == COUPLE_MODE_PEER) {
+  if ((s_couple.req_mode == COUPLE_MODE_PEER) ||
+      (s_couple.req_mode == COUPLE_MODE_P2P)) {
     flags |= (uint8_t)COUPLE_STATUS_MODE_PEER;
   }
   if (s_couple.saturated) {
@@ -387,4 +550,51 @@ void Couple_GetStatus(Couple_Status_t* out) {
   out->err_counts = s_couple.err;
   out->flags = flags;
   out->peer_age_us = s_couple.peer_age_us;
+}
+
+bool Couple_SetP2PParam(uint8_t id, int32_t value) {
+  switch (id) {
+    case CAN_PARAM_P2P_WN_DHZ:
+      if ((value < COUPLE_P2P_WN_DHZ_MIN) || (value > COUPLE_P2P_WN_DHZ_MAX)) {
+        return false;
+      }
+      s_couple.p2p_wn_dhz = value;
+      break;
+    case CAN_PARAM_P2P_ZETA_PCT:
+      if ((value < COUPLE_P2P_ZETA_PCT_MIN) ||
+          (value > COUPLE_P2P_ZETA_PCT_MAX)) {
+        return false;
+      }
+      s_couple.p2p_zeta_pct = value;
+      break;
+    case CAN_PARAM_P2P_KF_PCT:
+      if ((value < COUPLE_P2P_KF_PCT_MIN) || (value > COUPLE_P2P_KF_PCT_MAX)) {
+        return false;
+      }
+      s_couple.p2p_kf_pct = value;
+      break;
+    case CAN_PARAM_P2P_DOB_G: {
+      if ((value < COUPLE_P2P_DOB_G_MIN) || (value > COUPLE_P2P_DOB_G_MAX)) {
+        return false;
+      }
+      /* d = z - k*v must not jump when k = g/G changes: move z with it. */
+      float const dk = (float)(value - s_couple.p2p_g);
+      s_couple.dob_own.z += dk / P2P_G_OF(CAN_NODE_ID) * s_couple.own_vel;
+      s_couple.dob_peer.z +=
+          dk / P2P_G_OF(CAN_PEER_NODE_ID) * s_couple.peer_vel;
+      s_couple.p2p_g = value;
+      break;
+    }
+    case CAN_PARAM_P2P_FRIC_PCT:
+      if ((value < COUPLE_P2P_FRIC_PCT_MIN) ||
+          (value > COUPLE_P2P_FRIC_PCT_MAX)) {
+        return false;
+      }
+      s_couple.p2p_fric_pct = value;
+      break;
+    default:
+      return false;
+  }
+  P2PDerive();
+  return true;
 }

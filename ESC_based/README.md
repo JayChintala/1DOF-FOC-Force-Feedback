@@ -31,6 +31,18 @@ With `Kd_local = 0` this is the same law as `position_mirror_test.py`, in the sa
 
 `own0` and `peer0` are captured when the mode engages. A mode engages only once **both shafts are still** (under 2000 counts/s), so both ESCs capture their zero from the same physical state. Keep your hands off the shafts when engaging.
 
+## P2P mode (CHANGE 9): no leader, no follower
+
+`COUPLE_MODE 3` runs Keio-style acceleration-based bilateral control on both ESCs. Each ESC runs a disturbance observer for its own motor and one for the peer (from the peer's TELEM). The control is split into a **differential mode**, a position servo that drives `x_A − x_B → 0`, and a **common mode**, a force servo that drives `f_A + f_B → 0`. Your push accelerates both shafts instead of stretching a spring, and the observers' integral action drives the steady gap to zero. The full law and the meaning of each gain are in `couple_ctrl.h` ("P2P mode").
+
+```
+python3 p2p_teleop.py                     # defaults: wn 20 Hz, zeta 1, Kf 100 %, g 150 rad/s, fric 0 %
+python3 p2p_teleop.py --wn 25 --kf 150    # stiffer gap, lighter feel
+python3 p2p_sim.py --sweep                # the offline model the defaults came from
+```
+
+Tuning is sent as SET_PARAM 3–7 (RAM-only, re-sent on every run). Trip 6 (observer input out of range) means a board's Iq readback stopped being a RUN-state current.
+
 ## Build and flash
 
 1. In CubeIDE: **File → Import → Existing Projects into Workspace** → `ESC_based/STM32/MCWorkbench/STM32CubeIDE`. The project is named `ESC_based`, so it can sit next to the original `MCWorkbench` project in the same workspace.
@@ -74,7 +86,8 @@ Once you have settled values, put them in as `COUPLE_DEFAULT_*` in `couple_ctrl.
 | base+0x003 SET_IQ | Pi→ESC | float32 A. Direct mode only; resend within 200 ms |
 | base+0x004 COUPLE_GAINS | Pi→ESC | float32 Kp [A/count], float32 Kd [A/(count/s)] |
 | base+0x005 COUPLE_LOCAL | Pi→ESC | float32 Kd_local [A/(count/s)], float32 Iq_max [A, capped at 0.8] |
-| base+0x006 COUPLE_MODE | Pi→ESC | uint8: 0 off, 1 hold, 2 peer. Sending it again re-zeroes |
+| base+0x006 COUPLE_MODE | Pi→ESC | uint8: 0 off, 1 hold, 2 peer, 3 p2p. Sending it again re-zeroes |
+| base+0x007 SET_PARAM | Pi→ESC | uint8 id, int32 value: 1 Tafter, 2 current-loop gain %, 3–7 P2P tuning |
 | base+0x012 TELEM | ESC→all | unchanged: float32 Iq, uint16 encoder, uint16 µs clock |
 | 0x100+base+0x012 DBG | ESC→Pi | int16 Iq cmd [mA], int16 err [counts], uint16 µs clock (same as TELEM), uint8 status, uint8 peer age [0.1 ms] |
 
@@ -93,6 +106,7 @@ Each of these drops coupling, zeroes Iq and latches a trip code that the monitor
 | 3 velocity limit | own shaft > 200000 counts/s (50 rev/s); a wrong torque sign shows up as this or as 2 |
 | 4 host timeout | direct mode: no `SET_IQ` for 200 ms |
 | 5 left RUN | the motor faulted while engaged |
+| 6 observer range | P2P: an Iq readback the observers use is beyond 1.2 A (peer not in RUN?) |
 
 A trip on one ESC does not trip the other. If ESC A trips, ESC B stays engaged and holds toward A's now-passive position until the Pi sends OFF or STOP, which the monitor always does on exit.
 

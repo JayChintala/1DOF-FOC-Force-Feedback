@@ -484,3 +484,45 @@ ESC_CURR_GAIN (default 100) before every START, like ESC_TAFTER.
 RESULT: whine -5.6 / -11.5 / -17.8 dB at 50 / 25 / 12 % (about 6 dB per
 halving, back to baseline at 100 %). Cost: 1 ms Iq wander at 0 A
 6.9 / 8.9 / 12 / 18 mA. No default chosen yet (user feel test pending).
+
+===========================================================================
+CHANGE 9 (2026-11-18, JayPC; branch feature/p2p-dob-bilateral)
+P2P mode: symmetric bilateral control with disturbance observers
+===========================================================================
+
+WHY: PEER mode (COUPLE_MODE 2) is symmetric but springy: your push has to
+stretch a spring (Kp A/count) before the other shaft moves, it saturates at
+Iq_max/Kp = 114 counts, and raising Kp hit a 57 Hz mode (TEST_LOG
+2026-11-15). The user asked for Keio-style (Ohnishi/Katsura) acceleration-
+based 4-channel bilateral control as a second architecture beside the Pi
+leader/follower teleop: no dedicated leader or follower.
+
+WHAT (couple_ctrl.h "P2P mode" has the full law):
+- COUPLE_MODE 3 = P2P. Same engage/trip/DBG machinery as PEER; DBG err is
+  the same position gap; status bit3 (MODE_PEER) is set for PEER and P2P.
+- Each ESC runs TWO disturbance observers: its own (on this tick's 1 ms
+  mean Iq + encoder) and the peer's (on the peer's TELEM, which already
+  carries Iq). No new CAN frame, no new ID, no filter change.
+  -> CAN_TickSample_t.iq_a and CAN_PeerSample_t.iq_a added; the Iq mean is
+     now drained in CAN_ControlTick() BEFORE Couple_Tick() (SampleIq()), and
+     TELEM sends that same value, so TELEM's bytes are unchanged.
+- Law: ddx = 0.5*(Kf*(f_own+f_peer) - wn^2*err - 2*zeta*wn*derr);
+  iq = ddx/G_own + d_own, clamped at Iq_max. Observers use MEASURED Iq, so
+  no wind-up at the clamp. Plant table (G, Coulomb) for nodes 0/1 in
+  couple_ctrl.h; both boards carry both rows.
+- SET_PARAM 3..7 (range-checked, applied immediately, RAM-only):
+  3 wn [0.1 Hz] 10..400 (default 200), 4 zeta [%] 20..300 (100),
+  5 Kf [% of 2*G_B] 0..300 (100), 6 DOB cutoff g [rad/s] 20..1000 (150),
+  7 RFOB friction compensation [%] 0..150 (0). Defaults from p2p_sim.py.
+- Trip 6 OBS_RANGE: an Iq readback beyond 1.2 A (no RUN-state board makes
+  one; IDLE TELEM reads +-25 A) while engaged. The same check blocks
+  engagement until both readbacks are sane; both observers reset at engage.
+- HOLD and PEER paths are unchanged.
+
+PI SIDE: can_interface.py (COUPLE_MODE_P2P, PARAM_P2P_*, send_p2p_params,
+trip 6; send_set_param now waits 3 ms after each frame -- the firmware
+latches SET_PARAM in ONE latest-wins slot, so back-to-back frames inside a
+millisecond kept only the last); p2p_teleop.py (run it); p2p_sim.py
+(offline model the defaults came from).
+
+BUILD: both configs, 0 warnings.

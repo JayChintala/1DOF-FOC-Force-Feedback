@@ -90,6 +90,7 @@ typedef struct {
   uint32_t arrival_cyc; /* DWT->CYCCNT when the frame left the Rx FIFO */
   uint16_t enc;
   uint16_t ts_us;
+  float iq_a; /* CHANGE 9 */
 } CAN_PeerRaw_t;
 
 static volatile CAN_PeerRaw_t s_peerBuf[2];
@@ -373,6 +374,7 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef* hfdcan,
         s_peerBuf[w].arrival_cyc = DWT->CYCCNT;
         s_peerBuf[w].enc = (uint16_t)(rxData[4] | (rxData[5] << 8));
         s_peerBuf[w].ts_us = (uint16_t)(rxData[6] | (rxData[7] << 8));
+        s_peerBuf[w].iq_a = FloatAt(&rxData[0]);
         s_peerBuf[w].seq = ++s_peerSeq;
         __DMB(); /* the sample is complete before it becomes current */
         s_peerIdx = w;
@@ -396,6 +398,7 @@ bool CAN_GetPeerSample(const CAN_TickSample_t* now, CAN_PeerSample_t* out) {
   out->seq = seq;
   out->enc = s_peerBuf[r].enc;
   out->ts_us = s_peerBuf[r].ts_us;
+  out->iq_a = s_peerBuf[r].iq_a;
   /* Cycle deltas are exact up to ~25 s, far longer than a sample stays
      fresh; couple_ctrl.c latches this only when seq changes. */
   out->arrival_us =
@@ -425,6 +428,8 @@ static void ApplySetParam(uint8_t id, int32_t value) {
     PID_SetKI(&PIDIqHandle_M1, ki);
     PID_SetKP(&PIDIdHandle_M1, kp);
     PID_SetKI(&PIDIdHandle_M1, ki);
+  } else if (Couple_SetP2PParam(id, value)) {
+    /* CHANGE 9: ids 3..7, range-checked there */
   } else {
     s_paramRejectCount++;
   }
@@ -494,6 +499,23 @@ static void FillTxHeader(FDCAN_TxHeaderTypeDef* hdr, uint32_t id) {
   hdr->TxEventFifoControl = FDCAN_NO_TX_EVENTS;
 }
 
+/* The 16 kHz accumulator (IqTelem_UpdateHF) must be drained exactly once
+   per tick -- GetMeanAndReset clears it; left uncalled the sum grows without
+   bound and loses float precision. With TELEM_IQ_MEAN its mean is what
+   TELEM sends (B4): a 16-tap boxcar has nulls at 1, 2, 3 ... kHz, exactly
+   where the 1 kHz decimation of the raw sample aliased from. It returns the
+   EWMA if no samples accrued (HF task not running), so the field never
+   reads as a bogus zero. CHANGE 9: drained BEFORE Couple_Tick(), so the P2P
+   observer runs on the very value TELEM then sends. */
+static float SampleIq(void) {
+#if TELEM_IQ_MEAN
+  return IqTelem_GetMeanAndReset() * scaleParams_M1.current;
+#else
+  (void)IqTelem_GetMeanAndReset();
+  return MC_GetIqdMotor1_F().q; /* raw single sample */
+#endif
+}
+
 static void SendTelemetry(const CAN_TickSample_t* s) {
   FDCAN_TxHeaderTypeDef hdr;
   FillTxHeader(&hdr, CAN_ID_TELEM(CAN_NODE_BASE));
@@ -504,19 +526,7 @@ static void SendTelemetry(const CAN_TickSample_t* s) {
   uint16_t const encCount = s->enc;
   uint16_t const tstamp_us = (uint16_t)s->us;
 
-  /* The 16 kHz accumulator (IqTelem_UpdateHF) must be drained exactly once
-     per telemetry period -- GetMeanAndReset clears it; left uncalled the
-     sum grows without bound and loses float precision. With
-     TELEM_IQ_MEAN its mean is what TELEM sends (B4): a 16-tap boxcar has
-     nulls at 1, 2, 3 ... kHz, exactly where the 1 kHz decimation of the
-     raw sample aliased from. It returns the EWMA if no samples accrued
-     (HF task not running), so the field never reads as a bogus zero. */
-#if TELEM_IQ_MEAN
-  float const iq_tx = IqTelem_GetMeanAndReset() * scaleParams_M1.current;
-#else
-  (void)IqTelem_GetMeanAndReset();
-  float const iq_tx = MC_GetIqdMotor1_F().q; /* raw single sample */
-#endif
+  float const iq_tx = s->iq_a; /* SampleIq(), this tick */
 
   /* SRAMCAN_TFQ_NBR is hardcoded to 3 in stm32g4xx_hal_fdcan.c, so a frame
    * offered while three are still queued is dropped outright rather than
@@ -679,6 +689,7 @@ void CAN_ControlTick(void) {
   }
   CAN_TickSample_t s;
   SampleTick(&s);
+  s.iq_a = SampleIq();
   Couple_Tick(&s);
   SendTelemetry(&s); /* TELEM first: the peer's coupling law is waiting on it */
   SendDebug(&s);

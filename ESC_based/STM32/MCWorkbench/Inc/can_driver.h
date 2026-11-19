@@ -48,6 +48,14 @@
 #define CAN_ID_COUPLE_LOCAL(base) ((base) + 0x005)
 #define CAN_ID_COUPLE_MODE(base) ((base) + 0x006)
 #define CAN_ID_SET_PARAM(base) ((base) + 0x007) /* CHANGE 7(a), SAMPLING_TAFTER_RUNTIME */
+
+/* SET_PARAM ids 3..7: P2P mode tuning (CHANGE 9, couple_ctrl.h "P2P mode").
+ * Ids 1 (Tafter) and 2 (current-loop gain) are in can_driver.c. */
+#define CAN_PARAM_P2P_WN_DHZ 3u   /* differential bandwidth, 0.1 Hz, 10..400 */
+#define CAN_PARAM_P2P_ZETA_PCT 4u /* its damping ratio, %, 20..300 */
+#define CAN_PARAM_P2P_KF_PCT 5u   /* force gain, % of 2*G_B, 0..300 */
+#define CAN_PARAM_P2P_DOB_G 6u    /* observer cutoff, rad/s, 20..1000 */
+#define CAN_PARAM_P2P_FRIC_PCT 7u /* RFOB Coulomb compensation, %, 0..150 */
 #define CAN_ID_TELEM(base) ((base) + 0x012)
 
 /* DBG lives 0x100 above TELEM (0x112 for ESC 1, 0x132 for ESC 2), outside
@@ -84,7 +92,8 @@
  *   base+0x004 COUPLE_GAINS   float32 Kp [A/count], float32 Kd [A/(count/s)]
  *   base+0x005 COUPLE_LOCAL   float32 Kd_local [A/(count/s)], float32 Iq_max [A]
  *   base+0x006 COUPLE_MODE    uint8 mode: 0 off (direct SET_IQ), 1 hold,
- *                             2 peer. Sending a mode again re-zeroes it.
+ *                             2 peer, 3 p2p (CHANGE 9). Sending a mode
+ *                             again re-zeroes it.
  *                             Optional uint8 flags: COUPLE_FLAG_* in
  *                             couple_ctrl.h (bit 0 = predict peer).
  *   base+0x007 SET_PARAM      (CHANGE 7(a), SAMPLING_TAFTER_RUNTIME) DLC 5:
@@ -95,13 +104,16 @@
  *                             Param 2 (CHANGE 8) = current-loop gain, % of
  *                             the Workbench Kp/Ki (Iq and Id), 5..200;
  *                             CircleLimitationM1.MaxModule/MaxVd follow it
- *                             (sampling_tafter.c). Wrong length,
+ *                             (sampling_tafter.c). Params 3..7
+ *                             (CHANGE 9) = P2P tuning, CAN_PARAM_P2P_*
+ *                             above. Wrong length,
  *                             unknown id or out of range: ignored, counted
  *                             (DIAG flags bit6). Readback: DIAG2 [6..7].
  *
  * TELEM payload, 8 bytes, little-endian -- everything the Pi reads, in one
  * frame per 1 kHz tick. The PEER ESC reads it too: bytes 4..7 are what
- * its coupling law runs on.
+ * its coupling law runs on, and P2P mode (CHANGE 9) also runs this node's
+ * disturbance observer on bytes 0..3.
  *   [0..3] float32  Iq, Amps: 1 ms mean of the 16 kHz samples when
  *                   TELEM_IQ_MEAN (default, can_driver.c); raw single
  *                   sample MC_GetIqdMotor1_F().q when TELEM_IQ_MEAN is 0
@@ -225,6 +237,8 @@ typedef struct {
   uint32_t cyc; /* raw DWT->CYCCNT; differences valid up to ~25 s */
   uint32_t us;  /* extended microsecond clock, wraps at 2^32 us (~71 min) */
   uint16_t enc; /* raw TIM4 count, 0..3999 */
+  float iq_a;   /* measured Iq over the tick that just ended, A: exactly
+                   the value this tick's TELEM sends (CHANGE 9) */
 } CAN_TickSample_t;
 
 /* The latest TELEM received from the peer node. */
@@ -235,6 +249,7 @@ typedef struct {
                           frame is fresh -- latch it when seq changes. */
   uint16_t enc;        /* peer's raw TIM4 count */
   uint16_t ts_us;      /* peer's own uint16 microsecond timestamp */
+  float iq_a;          /* peer's TELEM Iq, A (CHANGE 9, P2P observer) */
 } CAN_PeerSample_t;
 
 /* ---- Public API ---- */

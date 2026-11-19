@@ -14,7 +14,7 @@ ESC_based/STM32/MCWorkbench/Inc/can_driver.h):
                                       firmware zeroes the current.
     base+0x004 COUPLE_GAINS  Pi->MCU  float32 Kp [A/count], float32 Kd [A/(count/s)]
     base+0x005 COUPLE_LOCAL  Pi->MCU  float32 Kd_local [A/(count/s)], float32 Iq_max [A]
-    base+0x006 COUPLE_MODE   Pi->MCU  uint8 mode: 0 off, 1 hold, 2 peer;
+    base+0x006 COUPLE_MODE   Pi->MCU  uint8 mode: 0 off, 1 hold, 2 peer, 3 p2p;
                                       optional uint8 flags (bit 0 = predict)
     base+0x012 TELEM         MCU->Pi  8 bytes LE, once per 1 kHz firmware tick:
                                [0..3] float32 Iq, Amps (raw, unfiltered)
@@ -39,7 +39,9 @@ ESC_based/STM32/MCWorkbench/Inc/can_driver.h):
                                [6..7] int16 board NTC, deg C
                              Both absent on firmware without CHANGE 4.
     base+0x007 SET_PARAM     Pi->MCU  DLC 5: uint8 param id, int32 value (CHANGE 7);
-                             param 1 = Tafter in TIM1 counts, 400..2040
+                             param 1 = Tafter in TIM1 counts, 400..2040;
+                             param 2 = current-loop gain % (CHANGE 8);
+                             params 3..7 = P2P tuning (CHANGE 9, PARAM_P2P_*)
     0x100+base+0x015 DIAG2   MCU->Pi  8 bytes LE, 10 Hz (CHANGE 7): int16 Vq before
                              circle limitation, uint16 circle-limited RUN periods,
                              uint16 non-forced RUN periods (both since the previous
@@ -85,6 +87,14 @@ PARAM_CURR_GAIN_PCT = 2        # CHANGE 8: current-loop Kp/Ki, % of the Workbenc
 # Workbench tuning. Firmware without CHANGE 8 flags it as a rejected
 # SET_PARAM and otherwise ignores it.
 DEFAULT_CURR_GAIN_PCT = int(os.environ.get("ESC_CURR_GAIN", "50"))
+# CHANGE 9: P2P mode tuning (couple_ctrl.h "P2P mode"). RAM-only, applied
+# immediately, engaged or not; out-of-range values are rejected and flagged.
+SET_PARAM_GAP_S = 0.003       # > 2 firmware ticks between SET_PARAMs (see send_set_param)
+PARAM_P2P_WN_DHZ = 3          # differential bandwidth, 0.1 Hz units, 10..400
+PARAM_P2P_ZETA_PCT = 4         # its damping ratio, %, 20..300
+PARAM_P2P_KF_PCT = 5           # force gain, % of 2*G_B, 0..300
+PARAM_P2P_DOB_G = 6            # observer cutoff, rad/s, 20..1000
+PARAM_P2P_FRIC_PCT = 7         # RFOB Coulomb compensation, %, 0..150
 OFFSET_TELEM = 0x012
 # DBG sits 0x100 above TELEM, outside every node's block, so it loses
 # arbitration to all control traffic -- see CAN_ID_DBG in can_driver.h.
@@ -104,6 +114,7 @@ DIAG_PARAM_REJECTED = 1 << 6     # a SET_PARAM was rejected since the previous D
 COUPLE_MODE_OFF = 0
 COUPLE_MODE_HOLD = 1
 COUPLE_MODE_PEER = 2
+COUPLE_MODE_P2P = 3           # CHANGE 9: DOB bilateral, no leader/follower
 COUPLE_FLAG_PREDICT = 1 << 0  # PEER mode: couple to the peer's predicted
                               # position now, not its ~1 ms-old sample
 
@@ -111,7 +122,7 @@ COUPLE_FLAG_PREDICT = 1 << 0  # PEER mode: couple to the peer's predicted
 STATUS_RUN = 1 << 0        # motor state machine in RUN
 STATUS_ENGAGED = 1 << 1    # coupling law driving Iq
 STATUS_REQUESTED = 1 << 2  # a mode is requested (maybe not engaged yet)
-STATUS_MODE_PEER = 1 << 3  # requested mode is PEER (else HOLD)
+STATUS_MODE_PEER = 1 << 3  # requested mode uses the peer: PEER or P2P (not HOLD)
 STATUS_SATURATED = 1 << 4  # Iq clamped at Iq_max
 STATUS_TRIP_SHIFT = 5      # bits 5..7: last trip code
 
@@ -122,6 +133,7 @@ TRIP_NAMES = {
     3: "velocity limit (50 rev/s)",
     4: "SET_IQ host timeout",
     5: "motor left RUN (fault?)",
+    6: "P2P observer input out of range (peer not in RUN?)",
 }
 
 # Peer age byte saturates here: "25.5 ms or more, or never received".
@@ -480,8 +492,23 @@ class MotorCANInterface:
         self._send(self._id_stop)
 
     def send_set_param(self, param_id: int, value: int):
-        """CHANGE 7 SET_PARAM; the firmware ignores (and flags) bad ids/values."""
+        """CHANGE 7 SET_PARAM; the firmware ignores (and flags) bad ids/values.
+
+        The firmware latches SET_PARAM in ONE latest-wins slot that its 1 kHz
+        hook drains, so two frames inside the same millisecond keep only the
+        second (send_start() sends Tafter then the current-loop gain ~0.1 ms
+        apart). The pause guarantees a drain between consecutive frames."""
         self._send(self._id_set_param, struct.pack("<Bi", int(param_id), int(value)))
+        time.sleep(SET_PARAM_GAP_S)
+
+    def send_p2p_params(self, wn_hz: float, zeta: float, kf_pct: int,
+                        dob_g: int, fric_pct: int):
+        """CHANGE 9 P2P tuning, as SET_PARAM 3..7 (see PARAM_P2P_*)."""
+        self.send_set_param(PARAM_P2P_WN_DHZ, int(round(wn_hz * 10)))
+        self.send_set_param(PARAM_P2P_ZETA_PCT, int(round(zeta * 100)))
+        self.send_set_param(PARAM_P2P_KF_PCT, int(kf_pct))
+        self.send_set_param(PARAM_P2P_DOB_G, int(dob_g))
+        self.send_set_param(PARAM_P2P_FRIC_PCT, int(fric_pct))
 
     def send_tafter(self, counts: int):
         if not 400 <= counts <= 2040:

@@ -9,6 +9,10 @@
  *                     engaged. Single-motor bring-up for stiff gains.
  *   COUPLE_MODE_PEER  spring+damper to the OTHER ESC's shaft, read straight
  *                     off the bus. The Pi is not in this loop.
+ *   COUPLE_MODE_P2P   peer-to-peer bilateral control with disturbance
+ *                     observers (Keio-style acceleration-based 4-channel
+ *                     control). Same transport as PEER, different law --
+ *                     see "P2P mode" below.
  *
  * The law, run once per 1 kHz tick on each ESC:
  *
@@ -37,6 +41,7 @@
 #define COUPLE_MODE_OFF 0u
 #define COUPLE_MODE_HOLD 1u
 #define COUPLE_MODE_PEER 2u
+#define COUPLE_MODE_P2P 3u
 
 /* ---- COUPLE_MODE flags (optional second payload byte) ----
  * PREDICT: in PEER mode, couple to where the peer shaft is NOW --
@@ -113,12 +118,106 @@
 #define COUPLE_DIRECT_TIMEOUT_US 20000u /* was 200000u; see FIRMWARE_CHANGES.txt */
 #endif
 
+/* ---- P2P mode (COUPLE_MODE_P2P) ----
+ *
+ * Symmetric bilateral control after Ohnishi/Katsura (Keio): no leader, no
+ * follower, the same law on both ESCs with own/peer swapped. Each motor is
+ * made into a nominal inertia by a disturbance observer (DOB); a reaction
+ * force observer (RFOB) estimates the external force on each shaft; and
+ * the control is split into two decoupled modes:
+ *
+ *   differential  x_own - x_peer -> 0     position servo, acceleration units
+ *   common        f_own + f_peer -> 0     force servo (action = reaction)
+ *
+ * Every 1 kHz tick, per shaft k in {own, peer} (the peer's from its TELEM:
+ * encoder and 1 ms mean Iq, so this ESC runs BOTH observers itself and no
+ * new frame is needed):
+ *
+ *   DOB    z_k += min(1, g*dt) * (i_k + (g/G_k)*v_k - z_k)
+ *          d_k  = z_k - (g/G_k)*v_k          disturbance, amps
+ *   RFOB   f_k  = -(d_k - comp*Fc_k*sat(v_k/V0))   external force, amps,
+ *                                                  + = toward +counts
+ *   ddx    = 0.5*( Kf*(f_own + f_peer) - Kp*err - Kv*derr )   counts/s^2
+ *   iq     = clamp( ddx/G_own + d_own, +-Iq_max )
+ *
+ * i_k is MEASURED current (TELEM's 1 ms mean), not the command, so the
+ * observer stays right when the output clamps -- no wind-up. err and derr
+ * are the PEER-mode error terms (predict flag included).
+ *
+ * What the gains mean:
+ *   Kp, Kv  = wn^2, 2*zeta*wn: the differential mode's natural frequency and
+ *           damping. Because the DOB cancels friction and load, steady-state
+ *           position error is driven to zero (the DOB acts as an integrator)
+ *           -- that is what removes PEER mode's spring.
+ *   Kf      sets the inertia you feel: a push f on one shaft accelerates
+ *           both at Kf*f/2, so the apparent mass is 2/Kf. 100 % = 2*G_B,
+ *           i.e. the pair feels like motor B alone (PEER mode: both rotors).
+ *   g       observer cutoff. Higher = stiffer, noisier (it differentiates a
+ *           4000-count encoder at 1 kHz).
+ *   comp    how much of the nominal Coulomb friction the RFOB subtracts.
+ *           0 = you feel both shafts' friction (honest physics); 100 % =
+ *           compensated, lighter, but it chatters at rest on 1-count
+ *           velocity noise (p2p_sim.py).
+ *
+ * Defaults from p2p_sim.py (2026-11-18): wn 20 Hz, zeta 1.0, g 150 rad/s,
+ * Kf 100 %, comp 0. The model goes unstable at Kv above ~500 /s (the 1 ms
+ * peer delay); the defaults put Kv at 251 /s. Each is a SET_PARAM
+ * (can_driver.h), applied immediately, engaged or not. */
+#ifndef COUPLE_P2P_WN_DHZ_DEFAULT
+#define COUPLE_P2P_WN_DHZ_DEFAULT 200 /* 0.1 Hz units: 20.0 Hz */
+#endif
+#ifndef COUPLE_P2P_ZETA_PCT_DEFAULT
+#define COUPLE_P2P_ZETA_PCT_DEFAULT 100
+#endif
+#ifndef COUPLE_P2P_KF_PCT_DEFAULT
+#define COUPLE_P2P_KF_PCT_DEFAULT 100
+#endif
+#ifndef COUPLE_P2P_DOB_G_DEFAULT
+#define COUPLE_P2P_DOB_G_DEFAULT 150 /* rad/s */
+#endif
+#ifndef COUPLE_P2P_FRIC_PCT_DEFAULT
+#define COUPLE_P2P_FRIC_PCT_DEFAULT 0
+#endif
+
+/* SET_PARAM ranges (outside = rejected and counted, like Tafter). */
+#define COUPLE_P2P_WN_DHZ_MIN 10    /* 1 Hz */
+#define COUPLE_P2P_WN_DHZ_MAX 400   /* 40 Hz */
+#define COUPLE_P2P_ZETA_PCT_MIN 20
+#define COUPLE_P2P_ZETA_PCT_MAX 300
+#define COUPLE_P2P_KF_PCT_MIN 0     /* 0 = no force channel: the pair locks */
+#define COUPLE_P2P_KF_PCT_MAX 300
+#define COUPLE_P2P_DOB_G_MIN 20
+#define COUPLE_P2P_DOB_G_MAX 1000
+#define COUPLE_P2P_FRIC_PCT_MIN 0
+#define COUPLE_P2P_FRIC_PCT_MAX 150
+
+/* Plant per node, indexed by CAN_NODE_ID (0 = ESC 1 = motor A, with the 3D
+ * arm; 1 = ESC 2 = motor B). Both boards carry both rows: each runs the
+ * other's observer too. G from TEST_LOG 2026-11-15 (A2 re-run on the 3D
+ * arm); Coulomb from follower_model_arm3d.json and leader_comp_B.json. */
+#define COUPLE_P2P_G_NODE0 4.082e6f  /* counts/s^2 per A */
+#define COUPLE_P2P_G_NODE1 8.877e6f
+#define COUPLE_P2P_FC_NODE0 0.025f   /* A */
+#define COUPLE_P2P_FC_NODE1 0.017f
+#define COUPLE_P2P_FRIC_V0_CNT_S 300.0f /* sat() knee of the Coulomb model */
+
+/* Kf at 100 %: 2*G_B, the same on both boards (symmetry needs that). */
+#define COUPLE_P2P_KF_REF (2.0f * COUPLE_P2P_G_NODE1)
+
+/* A measured Iq beyond this is not a current this firmware can command
+ * (clamp 0.8 A, readback seen to 0.85 A); it is TELEM from a board that is
+ * not in RUN (IDLE reads +-25 A with no offset calibration) or garbage.
+ * Blocks engagement; trips OBS_RANGE while engaged. */
+#define COUPLE_P2P_IQ_SANE_A 1.2f
+
 /* ---- DBG status byte ---- */
 #define COUPLE_STATUS_RUN (1u << 0)       /* motor state machine is in RUN */
 #define COUPLE_STATUS_ENGAGED (1u << 1)   /* coupling law is driving Iq */
 #define COUPLE_STATUS_REQUESTED (1u << 2) /* a mode is requested (maybe
                                              still waiting to engage) */
-#define COUPLE_STATUS_MODE_PEER (1u << 3) /* that mode is PEER, not HOLD */
+#define COUPLE_STATUS_MODE_PEER (1u << 3) /* that mode uses the peer:
+                                             PEER or P2P (not HOLD). The Pi
+                                             knows which one it asked for. */
 #define COUPLE_STATUS_SATURATED (1u << 4) /* Iq clamped at Iq_max */
 #define COUPLE_STATUS_TRIP_SHIFT 5u       /* bits 5..7: last trip code */
 #define COUPLE_STATUS_TRIP_MASK (7u << COUPLE_STATUS_TRIP_SHIFT)
@@ -131,6 +230,8 @@
 #define COUPLE_TRIP_VEL_LIMIT 3u    /* |own_vel| > COUPLE_VEL_LIMIT_CNT_S */
 #define COUPLE_TRIP_HOST_TIMEOUT 4u /* direct SET_IQ went stale */
 #define COUPLE_TRIP_LEFT_RUN 5u     /* motor left RUN while engaged (fault) */
+#define COUPLE_TRIP_OBS_RANGE 6u    /* P2P: a measured Iq the observers read
+                                       was out of range (peer not in RUN?) */
 
 typedef struct {
   float iq_cmd_a;       /* Iq commanded this tick; 0 when not in RUN */
@@ -148,6 +249,10 @@ bool Couple_SetGains(float kp, float kd);         /* false = rejected */
 bool Couple_SetLocal(float kd_local, float iq_max);
 void Couple_RequestMode(uint8_t mode, uint8_t flags); /* COUPLE_FLAG_* */
 void Couple_SetDirectIq(float amps);
+
+/* P2P tuning, from SET_PARAM ids CAN_PARAM_P2P_* (can_driver.h). Returns
+ * false for an unknown id or an out-of-range value (the caller counts it). */
+bool Couple_SetP2PParam(uint8_t id, int32_t value);
 
 void Couple_GetStatus(Couple_Status_t* out);
 
