@@ -432,6 +432,15 @@ OBS_COMP = 1.0 / (1.0 - math.pi * OBS_CUTOFF_HZ / CONTROL_RATE_HZ)
 # False keeps the original latest-value path for rollback. Override without
 # editing: TELEOP_FRAME_QUEUE=1 python3 teleop_test.py
 USE_FRAME_QUEUE = os.environ.get("TELEOP_FRAME_QUEUE", "0") == "1"
+# Write every drained frame to <log>_frames.csv. On by default, as before.
+# TELEOP_LOG_FRAMES=0 keeps the queue (the control law needs it) but skips
+# the file -- it is about half the total log volume, which matters on a long
+# unattended demo: with it on, 9.3 MB/min fills a 1.9 GB /dev/shm in ~3.4 h
+# and the run then dies on a failed write.
+LOG_FRAMES = os.environ.get("TELEOP_LOG_FRAMES", "1") == "1"
+# Render the summary PNG at exit. TELEOP_PLOT=0 skips it, which shortens the
+# dead time between runs when a supervisor restarts teleop in a loop.
+MAKE_PLOT = os.environ.get("TELEOP_PLOT", "1") == "1"
 # B2: velocity estimator feeding vel_a_filt / vel_b_filt (tracking, damping,
 # watchdog, observer). "legacy" = the original delta-pos over >= 2 ms of
 # kernel time + EMA. "ab55" = estimators.AlphaBetaVelocity(55 Hz) on every
@@ -481,7 +490,10 @@ STALE_TIMEOUT_S = 0.05  # telemetry older than this -> fail safe
 STALE_WARN_EVERY_S = 1.0
 PRINT_EVERY_S = 0.1     # throttle console output so it can't bottleneck the loop
 
-LOG_DIR = "logs"
+# Where finished logs land. TELEOP_OUT_DIR lets a demo run keep its output
+# in its own directory (e.g. logs/demo), so clearing it cannot touch the
+# real logs.
+LOG_DIR = os.environ.get("TELEOP_OUT_DIR", "logs")
 # Host-stall fix (confirmed 2026-10-22: SD-card write() calls block the main
 # loop for up to 1.6 s). With TELEOP_LOG_DIR set (e.g. /dev/shm/teleop) the
 # CSVs are written there during the run -- RAM, no SD stalls -- and moved,
@@ -654,7 +666,7 @@ def main():
 
     frames_file = frames_writer = None
     frames_logged = {"A": 0, "B": 0}
-    if USE_FRAME_QUEUE:
+    if USE_FRAME_QUEUE and LOG_FRAMES:
         frames_path = log_path[:-4] + "_frames.csv"
         frames_file = open(frames_path, "w", newline="")
         frames_writer = csv.writer(frames_file)
@@ -682,10 +694,11 @@ def main():
                     vel_out[name] = vel_est[name].update(r["mcu_time_us"], r["enc"])
                 if shadow_obs is not None and name == "A":
                     shadow_update(r)
-                frames_writer.writerow([loop_iter, name, f"{r['bus_time']:.6f}",
-                                        f"{r['mcu_time_us']:.0f}", f"{r['enc']:.0f}",
-                                        r["iq_meas"]])
-                frames_logged[name] += 1
+                if frames_writer is not None:      # TELEOP_LOG_FRAMES=0
+                    frames_writer.writerow([loop_iter, name, f"{r['bus_time']:.6f}",
+                                            f"{r['mcu_time_us']:.0f}", f"{r['enc']:.0f}",
+                                            r["iq_meas"]])
+                    frames_logged[name] += 1
 
     csv_file = open(log_path, "w", newline="")
     csv_writer = csv.writer(csv_file)
@@ -1116,7 +1129,7 @@ def main():
                   f"{100 * frac_b:.1f}% for B ({loop_hz * frac_b:.0f} Hz).")
             print("Firmware sends ENC_COUNT at 1000 Hz -- a large shortfall here "
                   "is dropped/late telemetry, not a slow shaft.")
-            png_path = plot_teleop_log(log_path)
+            png_path = plot_teleop_log(log_path) if MAKE_PLOT else None
             if LIVE_LOG_DIR:
                 # Off the live path now: move RAM logs to their final place.
                 moved = [shutil.move(src, os.path.join(LOG_DIR, os.path.basename(src)))

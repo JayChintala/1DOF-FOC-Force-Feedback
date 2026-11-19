@@ -32,6 +32,7 @@ firmware on both B-G431B-ESC1 boards. Newest entries at the bottom.
 | C2 | **PASS (live, 3D-printed arm, fitted model)**: free floor 19.1 mA (contact excluded; brief's 15 mA not met), static ≤ 5.0 %, loop p95 2.09 ms |
 | C3 | **Operating point K_F 1.0, KB_DAMP 0.35e-5, DB 20 mA**: free felt 18.7 mA (PASS), tap rise median 4 ms (PASS), user "light and responsive" with maybe one oscillation (marginal). Fallback KB 0.5e-5. Contact capped by the about 0.8 A ceiling |
 | Contact spring 2026-10-26 | **Holds fixed (user: "holds feel solid", no onset oscillation)**: `TELEOP_HOLD_K=0.5e-3 HOLD_MAX_A=0.05 HOLD_RAMP_S=0.3 IQ1_MAX_A=0.8`; hold slope −0.03/+0.02 A/s vs −0.3..−0.5 without. Before this fix: : a static press fades to 0 in 1–1.5 s (linear, about 0.5 A/s). Force circulates with loop gain 1 and leaks through the dead band and friction. Fix proposed: contact-latched position spring (C4 as written cannot fix it) |
+| Symmetric bilateral 2026-11-15 | **Explored, not adopted.** Firmware PEER mode already is a symmetric law and measures truly symmetric (corr(iq_A,−iq_B) = +0.998, 6.2 % residual). Blocked by a ~57 Hz coupled resonance that is undamped without a hand on it (up to 0.21 N of buzz); Kd_local 1e-5 did nothing, dropping `--predict` cut it 29 % at rest but cost 40 % in motion. Also 3.17× heavier than teleop (both rotors) + 0.11–0.19 N of uncompensated two-shaft friction. Needs a motor-B plant model to go further. No code written |
 | Leader ripple 2026-10-26 | **In-session leader cal adopted (`TELEOP_LEADER_CAL=1`, user "felt better")**: 12/28/36-rev speed ripple cut 3–4×; 7/rev in teleop still open. Firmware CHANGE 3 (NB_CONVERSIONS 128) flashed, did not fix 7/rev; CHANGE 4 logged as future. See "0b. RESUME HERE" |
 
 **Host stalls:** fixed (RT priority + `TELEOP_LOG_DIR` RAM logging).
@@ -5128,6 +5129,147 @@ current applied and 28 counts of total drift. **(inferred: a 3–5 sample
 median would be more robust; not changed.)**
 
 **Next:** D1.
+
+---
+
+## 2026-11-15: Symmetric bilateral (firmware PEER mode) — works and is truly symmetric; blocked by a ~57 Hz resonance and by honest physics
+
+User question: drop the leader/follower split so each motor responds to
+force applied to the other — one handle per hand, each feeling the other.
+
+**No code was written.** Firmware PEER mode already is this law, so the
+whole session is `coupling_monitor.py` runs at gains already in `logs/`.
+Save point before any of it: commit `16ab301`, tag `known-good-20261115`.
+
+### Why PEER mode already answers it
+
+`couple_ctrl.c` runs, on each ESC with own/peer swapped:
+
+```
+err = (own − own0) − (peer − peer0);  derr = own_vel − peer_vel
+iq  = clamp(−(Kp*err + Kd*derr + Kd_local*own_vel), ±Iq_max)
+```
+
+`err` is antisymmetric, so `iq_A ≈ −iq_B` by construction: Newton's third
+law, no designated leader. 1 kHz on each board, Pi out of the loop.
+
+### Runs (all Kp 0.007, Kd 2.5e-5, Iq_max 0.8, 60 s, engaged throughout, no trips)
+
+| # | Kd_local | predict | log | max \|err\| | saturated |
+|---|---|---|---|---|---|
+| 1 | 0 | yes | `coupling_peer_KP0.007_KD2.5e-05_KDL0_A0.8_PRED_2.csv` | 629 cnt | 8.3 % |
+| 2 | 1e-5 | yes | `coupling_peer_KP0.007_KD2.5e-05_KDL1e-05_A0.8_PRED_2.csv` | 1295 cnt | 15.9 % |
+| 3 | 1e-5 | **no** | `coupling_peer_KP0.007_KD2.5e-05_KDL1e-05_A0.8_3.csv` | 1228 cnt | 18.5 % |
+
+Worst peer age 1.0 ms in all three.
+
+### Symmetry — PASS (run 1, time-aligned)
+
+| | corr(iq_A, −iq_B) | residual asymmetry |
+|---|---|---|
+| all engaged | **+0.99807** | **6.2 %** |
+| not saturated | +0.99507 | 9.9 % |
+| saturated | +1.00000 | 0.1 % |
+
+`corr(err_A, −err_B) = +0.99995`. This is a genuine symmetric coupling.
+
+> **Analysis gotcha.** The two motors' rows are separate asynchronous 1 kHz
+> streams (median offset 0.25 ms). Comparing them by ROW INDEX gave a bogus
+> 28.4 % / 45.6 % asymmetry. Align on `t_s` (nearest within 0.6 ms) first.
+
+### Tracking and the stiffness/range trade
+
+Run 1 `|err|`: p50 **7** cnt (0.83 mm at tip), p90 91, p95 294, p99 487, max 629.
+
+`Iq_max / Kp = 0.8 / 0.007 =` **114 counts** (13.6 mm) is where the spring
+stops being a spring and becomes a constant 0.85 N — hit **8.3 %** of the
+time. **Kp × (error at saturation) = Iq_max is fixed**, so stiffer means it
+gives way sooner. Same 0.8 A ceiling that flattens rigid-vs-foam.
+
+### The blocker: a ~57 Hz resonance, undamped without a hand on it
+
+User: *"it did vibrate a lot with no physical dampening"* — confirmed. A
+whole-run spectrum hides it (46 s of hand motion swamps it); window it.
+
+1 s windows, `pos_range < 150` counts = hands off:
+
+| run | hands-off 40–90 Hz RMS (mean / p90 / max) | **while moving** (mean / max) | peak |
+|---|---|---|---|
+| 1 KDL 0, PRED | 7.72 / 15.19 / 21.06 cnt | 3.82 / 15.04 | 58 Hz |
+| 2 KDL 1e-5, PRED | 8.41 / 15.09 / 22.20 | 4.91 / 25.80 | 54.5 Hz |
+| 3 KDL 1e-5, NO-PRED | **6.01 / 10.47 / 15.73** | 6.85 / 32.42 | 57 Hz |
+
+Individual hands-off seconds reach **99.7 % of error energy at 60–64 Hz**,
+amplitude to 28 counts ≈ 0.21 N of buzz.
+
+It is the coupled natural frequency:
+**ω = √(Kp·(G_A+G_B)) = √(0.007 × 12.959e6) = 301 rad/s = 47.9 Hz**,
+measured 55–64 Hz. The 1 ms peer delay plus the firmware's coarse 1 kHz /
+1-count velocity estimate eat the phase margin there.
+
+- **Kd_local 1e-5 did nothing** (mean 7.72 → 8.41). On paper it should
+  contribute 0.030 A against a 0.056 A spring force at 8 counts, so for it
+  to do nothing the velocity it multiplies must be badly phase-lagged at
+  60 Hz. **(inferred — firmware velocity estimator not inspected.)**
+- **Dropping predict cut hands-off buzz 29 % mean / 31 % p90, but made
+  40–90 Hz content 40 % WORSE while moving.** Predict exists to compensate
+  the 1 ms peer age, which matters most in motion. A trade, not a fix.
+- **The resonance is at ~57 Hz in all three.** Only its amplitude moved.
+
+Untried: **Kp 0.004**, which would put the mode near 36 Hz (26° of lag
+instead of 43°), at the cost of saturating at 200 counts instead of 114.
+
+### Why it feels heavier than teleop — mostly intrinsic
+
+User: *"the teleop feels heavy compared to how it used to feel. Is that
+intrinsic?"* Largely yes.
+
+**1. Both rotors.** Through a spring the inertias add:
+
+| moving | G (cnt/s² per A) |
+|---|---|
+| leader alone (teleop) | 8,877,000 |
+| follower alone | 4,082,000 |
+| **coupled pair** | **2,796,197** |
+
+**3.17× heavier than moving the leader alone**, 1.46× vs the follower.
+
+**2. Two shafts of uncompensated friction.** Breakaway 0.05–0.09 A each →
+**0.11–0.19 N coupled = 12–22 % of the 0.85 N ceiling.** PEER mode has no
+friction or gravity compensation at all.
+
+**Teleop's lightness is asymmetry, not better engineering.** There the
+follower is *powered* to track, so the user's hand never pays for its
+rotor, and `follower_model_arm3d.json` + `TELEOP_LEADER_CAL` subtract both
+machines' friction and gravity. Peer coupling gives honest physics: a real
+rod with real mass and real stiction.
+
+| source of heaviness | fixable? |
+|---|---|
+| friction + gravity, 0.11–0.19 N | **yes, fully** — local per-motor feedforward |
+| inertia, 3.17× | partly — apparent-mass reduction needs an acceleration estimate, which this rig is bad at (see KD_SLOPE history) |
+| paying for the far rotor | **no, not while symmetric** — that IS Newton's third law |
+
+**Symmetric and light are in tension.** The available win is friction and
+gravity compensation, currently untapped in PEER mode.
+
+### Blocker for that: motor B has no plant model
+
+`follower_model_arm3d.json` is a full model (G, coulomb, lowspeed,
+viscous, grav_cos, grav_sin). `leader_comp_B.json` is **not** — only ripple
+harmonics and a Coulomb term, no G, no gravity, no viscous. Symmetric
+compensation needs `fit_follower_model.py` run on a vigorous free-motion
+**motor B** frames log. `G_B = 8.877e6 ± 1.9 %` is already measured (A2).
+
+Also note: PEER mode owns the Iq reference in firmware, so host-side
+compensation cannot be layered on top of it without a firmware change. The
+alternative is running the symmetric law on the host in direct SET_IQ mode
+(~4–6 ms round trip vs 1–2 ms), where all the Phase C infrastructure
+already lives.
+
+**Next, if resumed:** (1) fit the motor-B model; (2) decide firmware PEER
++ firmware compensation vs a host-side symmetric law; (3) Kp 0.004 for the
+resonance.
 
 ---
 
