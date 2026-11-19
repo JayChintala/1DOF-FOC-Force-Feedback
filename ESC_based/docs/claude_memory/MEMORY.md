@@ -1,0 +1,6 @@
+- [Flashed telemetry mismatch](flashed-telemetry-mismatch.md) — TELEM Iq reads ~±25 A while IDLE (no offset calib); trust it only after START
+- [ESC bus dropouts](esc1-bus-dropouts-undervoltage.md) — ESCs drop off CAN (both at once, even idle); stale telemetry masks it; re-plug + re-align
+- [CAN HAT IRQ load and frame drops](can-hat-irq-drops.md) — MCP2518FD HAT costs an IRQ per frame on CPU0; 1.7% drops + software timestamps wreck the D terms
+- [Test log & handoff](test-log-handoff.md) — ESC_based/software/TEST_LOG.md: running log + handoff; read TL;DR and "0c. RESUME HERE" first
+- [User runs live scripts](user-runs-live-scripts.md) — user can't watch plots/my live output; hand-held tests need a live text guide run in their terminal
+- [ESC flash host setup](esc-flash-host-setup.md) — JayPC builds/flashes; ESC1=SN …073237 (COM3), ESC2=SN …014734 (COM6); SSH to Pi works
