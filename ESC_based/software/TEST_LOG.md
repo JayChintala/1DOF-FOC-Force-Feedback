@@ -16,7 +16,7 @@ firmware on both B-G431B-ESC1 boards. Newest entries at the bottom.
 > the 2026-11-15 entry, where a session lost most of a day to exactly
 > this.
 
-**Status:** C1–C3 done; holds fixed (contact spring); leader ripple largely compensated (in-session cal). **Force calibrated at the tip: 1.058 N/A, R² 0.999, LINEAR TO 0.8 A (2026-11-15) — the >0.55 A measured-Iq breakdown is fixed by Tafter 400, which the Pi now sends before every START.** Firmware b26c643 (CHANGE 7) flashed. Operating point re-confirmed after a Pi restart (runs 21–24); rigid vs foam 9.7× on the follower. **Next: D1.** See "0c. RESUME HERE".
+**Status:** C1–C3 done; holds fixed (contact spring); leader ripple largely compensated (in-session cal). **Force calibrated at the tip: 1.058 N/A, R² 0.999, LINEAR TO 0.8 A (2026-11-15) — the >0.55 A measured-Iq breakdown is fixed by Tafter 400, which the Pi now sends before every START.** Firmware b26c643 (CHANGE 7) flashed; **2026-11-18: CHANGE 8 flashed (runtime current-loop gain), default 50 % = motor whine −6 dB, feel unchanged (user); builds/flashes now run from JayPC (`ESC_based/STM32/flash_and_verify.ps1`).** Operating point re-confirmed after a Pi restart (runs 21–24); rigid vs foam 9.7× on the follower. **Next: D1.** See "0c. RESUME HERE".
 
 | Step | Status |
 |---|---|
@@ -5344,14 +5344,25 @@ a pitch that wanders up and down.
   0.8 A motor, and 16x is the highest PGA gain this board's bias allows).
   Lower gain lets more low-frequency current wander through. That wander
   is felt torque (compare the C2 free floor of 19 mA).
-- **Not yet chosen:** a default. Next is a teleop feel and sound A/B at
-  `ESC_CURR_GAIN=50` vs 100. Current step response at reduced gain is not
-  measured (TELEM's 1 kHz is too slow to see it); inferred at about 440 Hz
-  bandwidth for 50 %.
+- **Teleop A/B at the 0c UPDATE 3 operating point** (`teleop_ab.sh`,
+  blind order; logs `/dev/shm/teleop/teleop_KVs3e-05_FB-1_26..28*` on the
+  Pi, RAM only):
+  - Run 26 = 50 %, run 27 = 100 %. Mic: 50 % is 5.7 dB quieter during the
+    hands-off leader cal and 9.6 dB quieter during teleop. The user
+    hand-tested only run 27: "the same as before" (expected; it is stock).
+  - Run 28 = 50 %, after an announced 100/50/25 % listening sweep. User:
+    "it got quieter for sure", feel "the same mostly".
+- **ADOPTED: 50 %** as the default (`can_interface.DEFAULT_CURR_GAIN_PCT`,
+  sent before every START; `ESC_CURR_GAIN=100` restores the Workbench
+  tuning). Current step response at 50 % is not measured (TELEM's 1 kHz is
+  too slow to show it); inferred at about 440 Hz bandwidth. 25 % is the
+  next option if quieter is wanted (12 mA wander, −12 dB).
 
 Firmware CHANGE 8 is flashed on both (see `FIRMWARE_CHANGES.txt`).
 `ESC_CURR_GAIN` is sent before every START (default 100 = unchanged).
 Board NTC after the runs: A 22 °C, B 39 °C.
+Tool note: don't pipe a remote teleop through grep/tail; it buffers the
+output and delays the spoken cues (fixed in `teleop_ab.sh`).
 
 ---
 

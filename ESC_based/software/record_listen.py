@@ -27,7 +27,23 @@ PI = "jayrpi4@192.168.1.164"
 PI_DIR = "~/1DOF-FOC-Force-Feedback/ESC_based/software"
 
 
-def record(remote, ch):
+# teleop_test.py cues: (substring, spoken text, phase label or None)
+CUES = [
+    ("Leader calibration: HANDS OFF", "Hands off the leader. Calibrating.", None),
+    ("Take the leader", "Go. Take the leader.", "teleop"),
+    ("Stopping", "Stopped.", "stopped"),
+]
+
+
+def speak(text):
+    """Windows text-to-speech, non-blocking (a person at the bench can't watch the screen)."""
+    cmd = ("Add-Type -AssemblyName System.Speech; "
+           "(New-Object System.Speech.Synthesis.SpeechSynthesizer).Speak('%s')" % text.replace("'", ""))
+    subprocess.Popen(["powershell", "-NoProfile", "-Command", cmd],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def record(remote, ch, say=False):
     chunks = []
 
     def cb(indata, frames, t, status):
@@ -44,6 +60,14 @@ def record(remote, ch):
             if line.startswith("PHASE "):
                 n, text = line[6:].split(":", 1)
                 phases.append({"n": int(n), "text": text.strip(), "t": t})
+                if say:
+                    speak(text.strip())
+            elif say:
+                for key, spoken, label in CUES:
+                    if key in line:
+                        speak(spoken)
+                        if label:
+                            phases.append({"n": 100 + len(phases), "text": label, "t": t})
         p.wait()
         time.sleep(1.0)
     return np.concatenate(chunks), phases
@@ -63,6 +87,7 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--channel", type=int, default=0)
     ap.add_argument("--wav", help="analyse an existing recording instead")
+    ap.add_argument("--say", action="store_true", help="speak phases and teleop cues")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
 
@@ -71,7 +96,7 @@ def main():
             x = np.frombuffer(w.readframes(w.getnframes()), np.int16) / 32768.0
         phases = json.load(open(os.path.join(a.out, "phases.json")))
     else:
-        x, phases = record(a.remote, a.channel)
+        x, phases = record(a.remote, a.channel, a.say)
         with wave.open(os.path.join(a.out, "audio.wav"), "wb") as w:
             w.setnchannels(1); w.setsampwidth(2); w.setframerate(FS)
             w.writeframes((np.clip(x, -1, 1) * 32767).astype(np.int16).tobytes())
