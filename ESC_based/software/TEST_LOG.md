@@ -5366,6 +5366,66 @@ output and delays the spoken cues (fixed in `teleop_ab.sh`).
 
 ---
 
+## 2026-11-18: CHANGE 9 — P2P mode (DOB bilateral, no leader/follower): simulated, built, flashed; bench run pending
+
+**User ask:** Keio-style peer-to-peer teleop with disturbance observers, no
+dedicated leader or follower, as a second architecture beside the Pi
+leader/follower teleop. PEER mode (11-15) was symmetric but springy.
+
+**Why PEER mode is springy and P2P shouldn't be:** in PEER mode your push has
+to stretch a spring (Kp A/count) before the other shaft moves. In P2P (the
+law is in `couple_ctrl.h`, "P2P mode") the push drives the *common mode*:
+both shafts accelerate together. The observers' integral action drives the
+steady gap to zero.
+
+**Offline model first** (`p2p_sim.py`: per-ESC 1 kHz ticks 0.25 ms apart,
+~1 ms peer age, encoder quantization, 1 ms mean Iq, 440 Hz current loop,
+9 mA wander, Coulomb friction, G_A 4.08e6 and G_B 8.88e6):
+
+| law | hold B, push A 0.3 A: steady gap | 3 Hz free sweep: hand force | B into a wall: hand vs wall force, gap |
+|---|---|---|---|
+| PEER Kp 0.007 Kd 2.5e-5 (11-15) | 45 cnt | 114 mA rms | 229 / 216 mA, 31 cnt |
+| **P2P wn 20 Hz, ζ 1, g 150, Kf 2·G_B** | **≈2 cnt** | **54 mA** (24 mA with fric comp 100 %) | **288 / 287 mA, 0.2 cnt** |
+
+- **Stability edge:** unstable at Kv = 2ζωn ≳ 500 /s (ωn 40 Hz at ζ 1;
+  30 Hz at ζ 1.5). Kf ×3 went unstable against the wall. The defaults put
+  Kv at 251 /s.
+- **Transient:** a 0.3 A step against a held B opens the gap to 81 counts
+  for about 20 ms (PEER: 50). The steady state is stiff; the first
+  milliseconds are not.
+- **Friction compensation** halves the hand effort but chatters at rest on
+  1-count velocity noise, so the default is 0 %.
+- **Caveat:** the model did NOT reproduce PEER's real 57 Hz buzz (it has
+  no structural modes), so treat its stability margins as optimistic.
+
+**Firmware:** CHANGE 9 (`FIRMWARE_CHANGES.txt`), commit c12dd52 on branch
+`feature/p2p-dob-bilateral`; both configs 0 warnings; flashed on both.
+Each ESC runs its own DOB and the peer's from TELEM, with no new frame.
+SET_PARAM 3–7 tune it. Trip 6 = observer input out of range.
+
+**Checks done (no motion beyond zero_iq):**
+- `flash_and_verify.ps1`: PASS.
+- `zero_iq_check.py`: PASS (RUN Iq std A 7.5 mA, B 6.7 mA).
+- All five P2P SET_PARAMs are accepted on both boards. wn = 9999 is
+  rejected (DIAG bit6). DIAG2 Tafter = 400 on both.
+
+**Found and fixed: back-to-back SET_PARAMs were dropped.** The firmware
+latches SET_PARAM in one latest-wins slot. `send_start()` sent Tafter and
+then the current-loop gain ~0.1 ms apart, so probably only the gain was
+applied (**inferred, not verified on old logs**: Tafter would then have been
+the stock 807 in runs since CHANGE 8). `send_set_param` now waits 3 ms per
+frame; Tafter 400 is confirmed applied.
+
+**Next (user at the bench):** `python3 p2p_teleop.py --duration 30 --iq-max 0.4`,
+hands off until "Engaged". Then:
+(1) hands-off: any buzz?
+(2) free motion, one hand per shaft;
+(3) hold one, push the other: springy?
+(4) the same with `--fric 100`.
+Compare with `coupling_monitor.py --kp 0.007 --kd 2.5e-5 --iq-max 0.8 --predict`.
+
+---
+
 ## Phase A summary (2026-10-20)
 
 | Step | Result | Key number |
