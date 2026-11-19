@@ -5314,6 +5314,47 @@ Logs: `ESC_based/STM32/flash_logs/` on JayPC (git-ignored);
 
 ---
 
+## 2026-11-18: Motor whine = current loop amplifying current-sense noise (CHANGE 8)
+
+**User report:** both motors whine at 0 A, the same loudness on each, with
+a pitch that wanders up and down.
+
+**Measured** with the JayPC bench mic (Audient iD4, 48 kHz) while
+`listen_test.py` stepped the motors off / both on / one at a time
+(`record_listen.py` on JayPC, `run_announced.ps1` to speak the phases):
+
+- RUN at 0 A adds broadband noise **25–30 dB over motors-off**, in humps at
+  1.2–1.8 kHz (loudest), 3.3–4 kHz, 5 kHz and 6.6 kHz, plus a line at
+  550 Hz. Nothing at 16 kHz, so it is not the PWM tone. Narrowband noise
+  like this sounds like a wavering pitch. The two motors are equal.
+- **Tafter 400 / 807 / 1360 / 2040: no change** (within 1 dB). The Tafter
+  400 fix does not cause it.
+- **Current-loop gain (CHANGE 8, SET_PARAM 2), both motors, 0 A:**
+
+  | Gain | Whine 0.5–8 kHz over off | 1 ms Iq std at 0 A (A / B) |
+  |---|---|---|
+  | 100 % | +29.3 dB (repeat +28.3) | 6.9 / 6.7 mA |
+  | 50 % | +23.7 dB | 8.9 / 8.8 mA |
+  | 25 % | +17.8 dB | 12.0 / 12.0 mA |
+  | 12 % | +11.5 dB | 18.0 / 18.2 mA |
+
+  About 6 dB per halving in every band, so the cause is confirmed: the
+  current PI (Workbench bandwidth 6000 rad/s ≈ 950 Hz, Ki/Kp = R/L)
+  amplifies current-sense noise (29.4 mA per ADC count; ±60 A range for a
+  0.8 A motor, and 16x is the highest PGA gain this board's bias allows).
+  Lower gain lets more low-frequency current wander through. That wander
+  is felt torque (compare the C2 free floor of 19 mA).
+- **Not yet chosen:** a default. Next is a teleop feel and sound A/B at
+  `ESC_CURR_GAIN=50` vs 100. Current step response at reduced gain is not
+  measured (TELEM's 1 kHz is too slow to see it); inferred at about 440 Hz
+  bandwidth for 50 %.
+
+Firmware CHANGE 8 is flashed on both (see `FIRMWARE_CHANGES.txt`).
+`ESC_CURR_GAIN` is sent before every START (default 100 = unchanged).
+Board NTC after the runs: A 22 °C, B 39 °C.
+
+---
+
 ## Phase A summary (2026-10-20)
 
 | Step | Result | Key number |

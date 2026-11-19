@@ -22,6 +22,13 @@
 #include "sampling_tafter.h" /* SAMPLING_TAFTER_RUNTIME, Tafter get/set (CHANGE 7(a)) */
 
 #define CAN_PARAM_TAFTER 1u /* SET_PARAM param id */
+#define CAN_PARAM_CURR_GAIN_PCT 2u /* CHANGE 8: current-loop gain, % of default */
+#define CURR_GAIN_PCT_MIN 5
+#define CURR_GAIN_PCT_MAX 200 /* 2 x 3882 would overflow int16 above ~840 % */
+
+#include "mc_config.h"      /* PIDIqHandle_M1, PIDIdHandle_M1 (CHANGE 8) */
+#include "pid_regulator.h"  /* PID_SetKP, PID_SetKI */
+#include "drive_parameters.h" /* PID_TORQUE_KP/KI_DEFAULT */
 
 /* B4: TELEM Iq = mean of every 16 kHz sample since the previous TELEM
    (IqTelem_GetMeanAndReset, raw s16A, scaled to Amps). 0 = the old raw
@@ -403,6 +410,21 @@ static void ApplySetParam(uint8_t id, int32_t value) {
   if ((id == CAN_PARAM_TAFTER) && (value >= (int32_t)SAMPLING_TAFTER_MIN) &&
       (value <= (int32_t)SAMPLING_TAFTER_MAX)) {
     Sampling_SetTafter((uint16_t)value);
+  } else if ((id == CAN_PARAM_CURR_GAIN_PCT) &&
+             (value >= (int32_t)CURR_GAIN_PCT_MIN) &&
+             (value <= (int32_t)CURR_GAIN_PCT_MAX)) {
+    /* CHANGE 8: scale the current-loop bandwidth. Kp and Ki of both the Iq
+       and Id PIs scale together from the Workbench defaults, so Ki/Kp stays
+       R/L (pole-zero cancellation). The integral sum is stored pre-Ki, so
+       the output does not jump. Persists across STOP/START until reset
+       (only FOC_Init() calls PID_HandleInit()). Each 16-bit store is atomic;
+       a 16 kHz period may see a new Kp with the old Ki, which is harmless. */
+    int16_t const kp = (int16_t)(((int32_t)PID_TORQUE_KP_DEFAULT * value) / 100);
+    int16_t const ki = (int16_t)(((int32_t)PID_TORQUE_KI_DEFAULT * value) / 100);
+    PID_SetKP(&PIDIqHandle_M1, kp);
+    PID_SetKI(&PIDIqHandle_M1, ki);
+    PID_SetKP(&PIDIdHandle_M1, kp);
+    PID_SetKI(&PIDIdHandle_M1, ki);
   } else {
     s_paramRejectCount++;
   }

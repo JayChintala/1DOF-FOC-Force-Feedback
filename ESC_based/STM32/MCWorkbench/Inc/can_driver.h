@@ -92,6 +92,8 @@
  *                             state within 1 ms. Param 1 = Tafter, the
  *                             forced-SECTOR_5 / natural-path sampling delay
  *                             in TIM1 counts (170 MHz), accepted 400..2040;
+ *                             Param 2 (CHANGE 8) = current-loop gain, % of
+ *                             the Workbench Kp/Ki (Iq and Id), 5..200;
  *                             CircleLimitationM1.MaxModule/MaxVd follow it
  *                             (sampling_tafter.c). Wrong length,
  *                             unknown id or out of range: ignored, counted

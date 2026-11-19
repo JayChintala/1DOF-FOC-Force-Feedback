@@ -460,3 +460,27 @@ session then runs zero_iq_check.py (re-aligns the encoders), and the B4
 checks: a 30 s HOLD zero-gain run on the free follower (Iq std >= 2x lower
 than 0.030-0.034 A, 247 Hz peak gone) and the A5(c) staircase (50 % step
 response <= 2.07 ms). Nothing for the dev-machine session to do there.
+
+===========================================================================
+CHANGE 8 (2026-11-18, JayPC; implemented, built and FLASHED on both boards)
+Runtime current-loop gain: SET_PARAM param 2
+===========================================================================
+
+WHY: both motors whine at 0 A in RUN (user: "constant whine whose pitch goes
+up and down"). A bench-mic recording (TEST_LOG 2026-11-18) shows broadband
+noise shaped by mechanical resonances (1.2-1.8, 3.3-4, 5, 6.6 kHz), nothing
+at the 16 kHz PWM, and no change with Tafter (400..2040, within 1 dB).
+Suspected: the current PI (Workbench bandwidth 6000 rad/s) amplifying the
+current-sense noise (29.4 mA per ADC count, raw std 30-43 mA).
+
+WHAT: can_driver.c ApplySetParam(): param 2 = current-loop gain in % of the
+Workbench defaults (PID_TORQUE/FLUX_KP/KI_DEFAULT), accepted 5..200, applied
+in the 1 kHz hook in any state. Kp and Ki of both the Iq and Id PIs scale
+together (Ki/Kp stays R/L). Only FOC_Init() calls PID_HandleInit(), so the
+value persists across STOP/START; a reset restores 100 %. Out-of-range values
+count as SET_PARAM rejects (DIAG bit6). Pi: can_interface sends
+ESC_CURR_GAIN (default 100) before every START, like ESC_TAFTER.
+
+RESULT: whine -5.6 / -11.5 / -17.8 dB at 50 / 25 / 12 % (about 6 dB per
+halving, back to baseline at 100 %). Cost: 1 ms Iq wander at 0 A
+6.9 / 8.9 / 12 / 18 mA. No default chosen yet (user feel test pending).

@@ -77,6 +77,12 @@ PARAM_TAFTER = 1               # sampling delay, TIM1 counts, accepted 400..2040
 # down above ~0.55 A at some angles (TEST_LOG 2026-10-29). ESC_TAFTER=807
 # restores stock.
 DEFAULT_TAFTER = int(os.environ.get("ESC_TAFTER", "400"))
+PARAM_CURR_GAIN_PCT = 2        # CHANGE 8: current-loop Kp/Ki, % of the Workbench values, 5..200
+# Also sent before every START (RAM-only, back to 100 on reset). The motor
+# whine scales ~6 dB per halving; 1 ms Iq wander at 0 A rises 6.9 -> 8.9 ->
+# 12 mA at 100/50/25 % (TEST_LOG 2026-11-18). Firmware without CHANGE 8
+# flags it as a rejected SET_PARAM and otherwise ignores it.
+DEFAULT_CURR_GAIN_PCT = int(os.environ.get("ESC_CURR_GAIN", "100"))
 OFFSET_TELEM = 0x012
 # DBG sits 0x100 above TELEM, outside every node's block, so it loses
 # arbitration to all control traffic -- see CAN_ID_DBG in can_driver.h.
@@ -459,7 +465,14 @@ class MotorCANInterface:
 
     def send_start(self):
         self.send_tafter(DEFAULT_TAFTER)
+        self.send_curr_gain(DEFAULT_CURR_GAIN_PCT)
         self._send(self._id_start)
+
+    def send_curr_gain(self, pct: int):
+        """CHANGE 8: current-loop bandwidth, % of the Workbench Kp/Ki."""
+        if not 5 <= pct <= 200:
+            raise ValueError("current-loop gain must be 5..200 %")
+        self.send_set_param(PARAM_CURR_GAIN_PCT, pct)
 
     def send_stop(self):
         self._send(self._id_stop)
