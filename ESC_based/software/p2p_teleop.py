@@ -81,6 +81,9 @@ def parse_args():
     p.add_argument("--fric", type=int, default=FRIC_PCT, help="%%, 0..150")
     p.add_argument("--ripple", type=int, default=100,
                    help="%% of the in-session ripple/cogging table to cancel, 0..150")
+    p.add_argument("--warmup", type=float, default=0.0,
+                   help="seconds at 0 A in RUN before the ripple cal (7/rev grows "
+                        "as the boards warm: tau ~160 s; 300 s ~ 85 %%)")
     p.add_argument("--no-cal", action="store_true",
                    help="skip the ~35 s ripple calibration (ripple comp off)")
     p.add_argument("--iq-max", type=float, default=IQ_MAX_A, help="A, <= 0.8")
@@ -102,6 +105,10 @@ def parse_args():
         p.error("--dob-g must be 20..1000 rad/s")
     if not 0 <= a.fric <= 150:
         p.error("--fric must be 0..150 %")
+    if a.warmup < 0:
+        p.error("--warmup must be >= 0")
+    if a.warmup and a.no_cal:
+        p.error("--warmup only applies to the ripple cal (drop --no-cal)")
     if not 0 <= a.ripple <= 150:
         p.error("--ripple must be 0..150 %")
     if not 0 < a.iq_max <= 0.8:
@@ -215,6 +222,7 @@ def main():
     os.makedirs(LOG_DIR, exist_ok=True)
     base_name = (f"p2p_WN{args.wn:g}_Z{args.zeta:g}_KF{args.kf}_G{args.dob_g}"
                  f"_FR{args.fric}_R{0 if args.no_cal else args.ripple}"
+                 f"{f'_W{args.warmup:g}' if args.warmup else ''}"
                  f"_A{args.iq_max:g}{'_PRED' if args.predict else ''}")
     log_path = unique_log_path(base_name)
 
@@ -273,6 +281,21 @@ def main():
             print(f"ESC {', '.join(stuck)} did not reach RUN (motor power on? fault?).")
             return 1
 
+        if args.warmup > 0:
+            print(f"Warm-up: {args.warmup:g} s in RUN at 0 A (shafts free, nothing moves).")
+            t_w = time.monotonic()
+            next_note = t_w
+            while time.monotonic() - t_w < args.warmup:
+                for iface in ifaces.values():
+                    iface.send_set_iq(0.0)        # inside the 20 ms host timeout
+                    iface.drain_records()         # discard; not part of the run log
+                if time.monotonic() >= next_note:
+                    left = args.warmup - (time.monotonic() - t_w)
+                    temps = " ".join(f"{n} {i.get_diag()['diag']['temp_c']} C"
+                                     for n, i in ifaces.items() if i.get_diag()["diag"])
+                    print(f"  warm-up {left:5.0f} s left   board NTC {temps}", flush=True)
+                    next_note += 30.0
+                time.sleep(0.01)
         cal_models = None
         if args.no_cal:
             for iface in ifaces.values():
@@ -364,6 +387,7 @@ def main():
             config = {"law": "p2p", "mode": "p2p", "motors": names, "wn_hz": args.wn, "zeta": args.zeta,
                       "kf_pct": args.kf, "dob_g": args.dob_g, "fric_pct": args.fric,
                       "ripple_pct": 0 if args.no_cal else args.ripple,
+                      "warmup_s": args.warmup,
                       "iq_max": args.iq_max, "predict": args.predict,
                       "duration_s": args.duration, "trip": trip_msg, "summary": summ,
                       "started": time.strftime("%Y-%m-%d %H:%M:%S",
