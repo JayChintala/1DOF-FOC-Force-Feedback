@@ -100,6 +100,19 @@ No new CAN IDs, no RX filter changes, no change to the TELEM or DBG layouts. Par
 
 ---
 
+### CHANGE 10: ripple (cogging) compensation
+
+The first hand test showed strong cogging. Each motor's observer was reporting its own angle-locked ripple as external force: 12-slot cogging at 12/24/36 per rev, a 7/rev current-offset ripple, and 14–84/rev. The force servo then passed **both** motors' ripple to the hand.
+
+The ripple map can't be fixed in advance. The 12/rev phase changes with every power-up and the 7/rev amplitude with every START (TEST_LOG 2026-10-26). So the Pi now measures it at the start of every session:
+
+- **Measure:** `p2p_cal.py` turns both shafts slowly, hands off, 1.25 rev each way (~35 s), and fits {1, 7, 12, 14, 24, 28, 36, 42, 84}/rev plus Coulomb friction for each motor.
+- **Upload:** both tables go to both ESCs (SET_PARAM 32–50 and 64–82, in µA). SET_PARAM 8 sets the ripple percentage.
+- **Firmware:** it removes each motor's ripple from that motor's observer input, so ripple no longer looks like force, and feeds its own motor's ripple forward. 1/rev on arm A is mostly gravity, so the arm's weight is cancelled too.
+- **Trig:** the firmware uses its own sine table. The MCSDK trig function drives the hardware CORDIC, which the FOC interrupt also uses.
+
+`p2p_teleop.py` runs the calibration automatically after START. `--no-cal` skips it, and `--ripple N` sets the percentage.
+
 ## 4. Pi code
 
 All paths are under `ESC_based/software/`.
@@ -109,6 +122,7 @@ All paths are under `ESC_based/software/`.
 | `can_interface.py` | `COUPLE_MODE_P2P`, `PARAM_P2P_*` ids, trip 6 name, `send_p2p_params(wn_hz, zeta, kf_pct, dob_g, fric_pct)`. **Bug fix:** `send_set_param()` now waits 3 ms after each frame (see below). |
 | `p2p_teleop.py` | **New.** Entry point for the P2P architecture: sends parameters, START, requests mode 3, waits for engagement, then prints a live line (positions, gap, each side's estimated force in N, Iq, status). A Pi-side mirror of the firmware observers provides the force readout. Logs CSV/JSON/PNG to `logs/p2p_*.csv`; prints gap percentiles and a force-mismatch figure at the end. Reuses logging and engage helpers from `coupling_monitor.py`. |
 | `p2p_sim.py` | **New.** Offline model used to choose the defaults and compare P2P against PEER mode (see §5). |
+| `p2p_cal.py` | **New (CHANGE 10).** In-session ripple/cogging calibration of both motors, with fit and upload. Called by `p2p_teleop.py`. |
 
 ### Bug fixed: dropped SET_PARAMs
 

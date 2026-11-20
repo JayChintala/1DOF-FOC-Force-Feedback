@@ -56,6 +56,10 @@
 #define CAN_PARAM_P2P_KF_PCT 5u   /* force gain, % of 2*G_B, 0..300 */
 #define CAN_PARAM_P2P_DOB_G 6u    /* observer cutoff, rad/s, 20..1000 */
 #define CAN_PARAM_P2P_FRIC_PCT 7u /* RFOB Coulomb compensation, %, 0..150 */
+/* CHANGE 10: in-session ripple (cogging) tables, couple_ctrl.h "Ripple". */
+#define CAN_PARAM_P2P_RIPPLE_PCT 8u /* ripple compensation, %, 0..150 */
+#define CAN_PARAM_P2P_TABLE_NODE0 32u /* 32..50: node 0 coefficients, uA */
+#define CAN_PARAM_P2P_TABLE_NODE1 64u /* 64..82: node 1 coefficients, uA */
 #define CAN_ID_TELEM(base) ((base) + 0x012)
 
 /* DBG lives 0x100 above TELEM (0x112 for ESC 1, 0x132 for ESC 2), outside

@@ -201,6 +201,38 @@
 #define COUPLE_P2P_FC_NODE1 0.017f
 #define COUPLE_P2P_FRIC_V0_CNT_S 300.0f /* sat() knee of the Coulomb model */
 
+/* ---- Ripple (cogging) compensation, CHANGE 10 ----
+ *
+ * Each motor has an angle-locked torque ripple (12-slot cogging at 12/24/
+ * 36/rev, current-offset 7/rev, 14/28/42/84/rev) plus, on arm A, gravity
+ * at 1/rev. Without a model the RFOB reports it as EXTERNAL FORCE, so the
+ * force servo hands both motors' ripple to the operator. A fixed map cannot
+ * work (TEST_LOG 2026-10-26: the 12/rev phase moves per power-up, the 7/rev
+ * amplitude per START), so the Pi measures it in-session (p2p_cal.py) and
+ * sends both motors' tables to both ESCs:
+ *
+ *   r_n(theta) = sum_h a_h cos(h theta) + b_h sin(h theta),
+ *   theta = 2 pi (raw TIM4 count) / 4000, h in COUPLE_RIPPLE_HARMONICS,
+ *   in amps to OVERCOME it (motor current frame, as leader_cal.py fits).
+ *
+ * With ripple_pct = p (0..150 %, 0 = off):
+ *   observer input   i_k -> i_k - p*r_k(theta_k)  (own AND peer), so the
+ *                    RFOB no longer sees ripple as force;
+ *   own output       iq += p*r_own(theta_own)     feed-forward, so the
+ *                    motor overcomes its own ripple without observer lag.
+ * The table's Coulomb term replaces the nominal one in the friction comp.
+ *
+ * SET_PARAM ids (int32 microamps; |coef| <= 0.3 A, Coulomb 0..0.2 A):
+ *   32 + 2k / 33 + 2k  node 0, harmonic k: cos / sin coefficient
+ *   50                 node 0 Coulomb
+ *   64 + 2k / 65 + 2k, 82   node 1, the same */
+#define COUPLE_RIPPLE_N_HARM 9
+#define COUPLE_RIPPLE_HARMONICS {1, 7, 12, 14, 24, 28, 36, 42, 84}
+#define COUPLE_RIPPLE_COEF_MAX_UA 300000
+#define COUPLE_RIPPLE_FC_MAX_UA 200000
+#define COUPLE_P2P_RIPPLE_PCT_MIN 0
+#define COUPLE_P2P_RIPPLE_PCT_MAX 150
+
 /* Kf at 100 %: 2*G_B, the same on both boards (symmetry needs that). */
 #define COUPLE_P2P_KF_REF (2.0f * COUPLE_P2P_G_NODE1)
 

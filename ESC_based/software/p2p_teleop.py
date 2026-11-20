@@ -57,6 +57,7 @@ from coupling_monitor import (DBG_TIMEOUT_S, DRAIN_PERIOD_S, ENGAGE_TIMEOUT_S,
                               TELEM_TIMEOUT_S, RunLog, status_tag,
                               unique_log_path, wait_for)
 from plot_coupling import plot_coupling_log
+import p2p_cal
 
 # Must match couple_ctrl.h COUPLE_P2P_* (the mirror observer only; the ESCs
 # use their own compiled-in copies).
@@ -78,6 +79,10 @@ def parse_args():
     p.add_argument("--kf", type=int, default=KF_PCT, help="%% of 2*G_B, 0..300")
     p.add_argument("--dob-g", type=int, default=DOB_G, help="rad/s, 20..1000")
     p.add_argument("--fric", type=int, default=FRIC_PCT, help="%%, 0..150")
+    p.add_argument("--ripple", type=int, default=100,
+                   help="%% of the in-session ripple/cogging table to cancel, 0..150")
+    p.add_argument("--no-cal", action="store_true",
+                   help="skip the ~35 s ripple calibration (ripple comp off)")
     p.add_argument("--iq-max", type=float, default=IQ_MAX_A, help="A, <= 0.8")
     p.add_argument("--predict", action="store_true",
                    help="extrapolate the peer position over its ~1 ms age")
@@ -97,6 +102,8 @@ def parse_args():
         p.error("--dob-g must be 20..1000 rad/s")
     if not 0 <= a.fric <= 150:
         p.error("--fric must be 0..150 %")
+    if not 0 <= a.ripple <= 150:
+        p.error("--ripple must be 0..150 %")
     if not 0 < a.iq_max <= 0.8:
         p.error("--iq-max must be in (0, 0.8]")
     kv = 2 * a.zeta * 2 * math.pi * a.wn
@@ -117,6 +124,20 @@ class MirrorObserver:
         self.v = 0.0
         self.z = None
         self.f = 0.0
+        self.model, self.rip = None, 0.0
+
+    def set_model(self, model, ripple_pct):
+        """Use the calibration table, as the firmware does (CHANGE 10)."""
+        self.model, self.rip = model, ripple_pct / 100.0
+        self.fc = min(0.2, max(0.0, model["coulomb_A"]))
+
+    def ripple(self, x):
+        if self.model is None or self.rip == 0.0:
+            return 0.0
+        th = 2 * math.pi * (x % 4000) / 4000
+        ab = self.model["ab_A"]
+        return self.rip * sum(ab[2 * k] * math.cos(h * th) + ab[2 * k + 1] * math.sin(h * th)
+                              for k, h in enumerate(self.model["harmonics"]))
 
     def reset(self):
         self.z = None
@@ -128,6 +149,7 @@ class MirrorObserver:
         else:
             dt = 1e-3
         self.t, self.x = t_us, x
+        iq = iq - self.ripple(x)
         k = self.g / self.G
         if self.z is None or abs(iq) > 1.2:
             self.z = iq + k * self.v
@@ -192,7 +214,8 @@ def main():
     names = ["A", "B"]
     os.makedirs(LOG_DIR, exist_ok=True)
     base_name = (f"p2p_WN{args.wn:g}_Z{args.zeta:g}_KF{args.kf}_G{args.dob_g}"
-                 f"_FR{args.fric}_A{args.iq_max:g}{'_PRED' if args.predict else ''}")
+                 f"_FR{args.fric}_R{0 if args.no_cal else args.ripple}"
+                 f"_A{args.iq_max:g}{'_PRED' if args.predict else ''}")
     log_path = unique_log_path(base_name)
 
     ifaces = {n: MotorCANInterface(channel=args.channel, bustype=args.interface,
@@ -250,6 +273,25 @@ def main():
             print(f"ESC {', '.join(stuck)} did not reach RUN (motor power on? fault?).")
             return 1
 
+        cal_models = None
+        if args.no_cal:
+            for iface in ifaces.values():
+                iface.send_set_param(p2p_cal.PARAM_RIPPLE_PCT, 0)  # stale tables off
+        else:
+            print(f"Ripple calibration: HANDS OFF -- both shafts turn {p2p_cal.REVS:g} rev "
+                  f"one way, then back (~{2 * (p2p_cal.REVS * 4000 / 300 + 1):.0f} s). "
+                  "Arm A must be free to swing a full turn.")
+            rows = p2p_cal.sweep_both(ifaces)
+            if rows is None:
+                return 1
+            cal_models = {n: p2p_cal.fit(rows[n]) for n in names}
+            for n in names:
+                print("  " + p2p_cal.summary(n, cal_models[n]))
+            p2p_cal.save(log_path[:-4], rows, cal_models)
+            p2p_cal.upload(ifaces, cal_models, args.ripple)
+            for n in names:
+                obs[n].set_model(cal_models[n], args.ripple)
+            time.sleep(0.3)   # let the shafts settle after the sweep
         print("HANDS OFF both shafts -- engaging once both are still...")
         for iface in ifaces.values():
             iface.send_couple_mode(COUPLE_MODE_P2P, COUPLE_FLAG_PREDICT if args.predict else 0)
@@ -321,6 +363,7 @@ def main():
             summ = summarize(summary_rows, args)
             config = {"law": "p2p", "mode": "p2p", "motors": names, "wn_hz": args.wn, "zeta": args.zeta,
                       "kf_pct": args.kf, "dob_g": args.dob_g, "fric_pct": args.fric,
+                      "ripple_pct": 0 if args.no_cal else args.ripple,
                       "iq_max": args.iq_max, "predict": args.predict,
                       "duration_s": args.duration, "trip": trip_msg, "summary": summ,
                       "started": time.strftime("%Y-%m-%d %H:%M:%S",

@@ -31,6 +31,73 @@
 #define P2P_TS_S 1.0e-3f /* own tick; the peer's dt comes from its stamps */
 #define TWO_PI_F 6.28318531f
 
+/* Ripple tables (CHANGE 10), per node: [2k] cos, [2k+1] sin, amps. */
+typedef struct {
+  float ab[2 * COUPLE_RIPPLE_N_HARM];
+  float fc; /* Coulomb, amps; the nominal value until a table arrives */
+} Ripple_t;
+
+static const uint16_t kRippleHarm[COUPLE_RIPPLE_N_HARM] =
+    COUPLE_RIPPLE_HARMONICS;
+static Ripple_t s_ripple[2] = {
+    {.fc = COUPLE_P2P_FC_NODE0},
+    {.fc = COUPLE_P2P_FC_NODE1},
+};
+
+/* Quarter-wave sine table over the 4000-count circle: s_sinQ[k] =
+   sin(2 pi k / 4000), k = 0..1000. Built once (SinTableInit()). NOT the
+   MCSDK's MCM_Trig_Functions(): that drives the hardware CORDIC, which the
+   16 kHz FOC interrupt also uses and can preempt mid-operation. */
+#define SIN_Q (ENC_MODULUS / 4)
+static float s_sinQ[SIN_Q + 1];
+static bool s_sinReady = false;
+
+static void SinTableInit(void) {
+  for (int32_t k = 0; k <= SIN_Q; k++) {
+    s_sinQ[k] = sinf(6.28318531f * (float)k / (float)ENC_MODULUS);
+  }
+  s_sinReady = true;
+}
+
+/* sin(2 pi idx / 4000) for any idx >= 0. */
+static float SinIdx(uint32_t idx) {
+  uint32_t const k = idx % (uint32_t)ENC_MODULUS;
+  uint32_t const q = k / (uint32_t)SIN_Q;
+  uint32_t const r = k % (uint32_t)SIN_Q;
+  switch (q) {
+    case 0u:
+      return s_sinQ[r];
+    case 1u:
+      return s_sinQ[SIN_Q - r];
+    case 2u:
+      return -s_sinQ[r];
+    default:
+      return -s_sinQ[SIN_Q - r];
+  }
+}
+
+/* r_node(theta) in amps (motor current frame), unscaled by ripple_pct. */
+static float RippleAt(uint32_t node, uint16_t enc) {
+  Ripple_t const* t = &s_ripple[node];
+  float r = 0.0f;
+  for (uint32_t k = 0u; k < (uint32_t)COUPLE_RIPPLE_N_HARM; k++) {
+    uint32_t const idx = (uint32_t)kRippleHarm[k] * (uint32_t)enc;
+    r += t->ab[2u * k] * SinIdx(idx + (uint32_t)SIN_Q) /* cos */
+         + t->ab[2u * k + 1u] * SinIdx(idx);
+  }
+  return r;
+}
+
+/* Raw count halfway between two consecutive raw counts, across the wrap. */
+static uint16_t MidCount(uint16_t a0, uint16_t a1) {
+  uint32_t sum = (uint32_t)a0 + (uint32_t)a1;
+  if (((int32_t)a0 - (int32_t)a1 > ENC_HALF) ||
+      ((int32_t)a1 - (int32_t)a0 > ENC_HALF)) {
+    sum += (uint32_t)ENC_MODULUS;
+  }
+  return (uint16_t)((sum / 2u) % (uint32_t)ENC_MODULUS);
+}
+
 /* One disturbance observer (couple_ctrl.h, "P2P mode"): z is the low-passed
    (i + k*v), k = g/G, and d = z - k*v is the disturbance in amps. */
 typedef struct {
@@ -49,6 +116,7 @@ typedef struct {
   /* This shaft, unwrapped. */
   bool own_valid;
   uint16_t own_raw;
+  uint16_t own_raw_prev; /* last tick's raw count (ripple midpoint) */
   int32_t own_pos;
   uint32_t own_us;
   float own_vel;
@@ -57,6 +125,7 @@ typedef struct {
   bool peer_valid;
   uint32_t peer_seq;
   uint16_t peer_raw;
+  uint16_t peer_raw_prev; /* ripple midpoint */
   int32_t peer_pos;
   uint16_t peer_ts;
   uint32_t peer_arrival_us;
@@ -73,10 +142,15 @@ typedef struct {
   float p2p_kv;   /* 2*zeta*wn, 1/s */
   float p2p_kf;   /* counts/s^2 per A */
   float p2p_comp; /* 0..1.5 */
+  int32_t p2p_ripple_pct;
+  float p2p_ripple; /* 0..1.5 */
 
   /* P2P observers. Iq in the encoder frame (COUPLE_TORQUE_SIGN applied). */
   float own_iq;  /* this tick's 1 ms mean */
   float peer_iq; /* from the latest peer TELEM */
+  float own_iq_eff;  /* minus the ripple table: what the observer sees */
+  float peer_iq_eff;
+  uint16_t own_enc; /* raw counts, for the ripple tables */
   Dob_t dob_own;
   Dob_t dob_peer;
   float f_own;  /* RFOB, last P2P tick: external force, amps */
@@ -127,6 +201,10 @@ static void P2PDerive(void) {
   s_couple.p2p_kv = 2.0f * 0.01f * (float)s_couple.p2p_zeta_pct * wn;
   s_couple.p2p_kf = 0.01f * (float)s_couple.p2p_kf_pct * COUPLE_P2P_KF_REF;
   s_couple.p2p_comp = 0.01f * (float)s_couple.p2p_fric_pct;
+  s_couple.p2p_ripple = 0.01f * (float)s_couple.p2p_ripple_pct;
+  if (!s_sinReady) {
+    SinTableInit();
+  }
   s_p2pDerived = true;
 }
 
@@ -247,8 +325,17 @@ static void UpdateOwn(const CAN_TickSample_t* s) {
      it: before START the Iq readback is meaningless. */
   float const iq = IsFinite(s->iq_a) ? COUPLE_TORQUE_SIGN * s->iq_a : 1.0e9f;
   s_couple.own_iq = iq;
+  s_couple.own_enc = s->enc;
+  /* Ripple at the middle of the interval the velocity was differenced over:
+     at 3000 counts/s that is 1.5 counts, 11 deg of 84/rev, vs 23 deg at
+     either end. */
+  uint16_t const mid = MidCount(s_couple.own_raw_prev, s->enc);
+  s_couple.own_raw_prev = s->enc;
+  s_couple.own_iq_eff =
+      iq - COUPLE_TORQUE_SIGN * s_couple.p2p_ripple * RippleAt(CAN_NODE_ID, mid);
   if (IqSane(iq)) {
-    DobStep(&s_couple.dob_own, iq, s_couple.own_vel, P2P_G_OF(CAN_NODE_ID),
+    DobStep(&s_couple.dob_own, s_couple.own_iq_eff, s_couple.own_vel,
+            P2P_G_OF(CAN_NODE_ID),
             (dt_us > 0u) ? (float)dt_us * 1.0e-6f : P2P_TS_S);
   } else {
     s_couple.dob_own.valid = false;
@@ -293,11 +380,15 @@ static void UpdatePeer(const CAN_TickSample_t* s) {
        reading no RUN-state board could produce, restarts it. */
     float const piq = IsFinite(p.iq_a) ? COUPLE_TORQUE_SIGN * p.iq_a : 1.0e9f;
     s_couple.peer_iq = piq;
+    uint16_t const pmid = MidCount(s_couple.peer_raw_prev, p.enc);
+    s_couple.peer_raw_prev = p.enc;
+    s_couple.peer_iq_eff = piq - COUPLE_TORQUE_SIGN * s_couple.p2p_ripple *
+                                     RippleAt(CAN_PEER_NODE_ID, pmid);
     if (gap || !IqSane(piq)) {
       s_couple.dob_peer.valid = false;
     } else {
       uint16_t const pdt_us = (uint16_t)(p.ts_us - s_couple.peer_ts);
-      DobStep(&s_couple.dob_peer, piq, s_couple.peer_vel,
+      DobStep(&s_couple.dob_peer, s_couple.peer_iq_eff, s_couple.peer_vel,
               P2P_G_OF(CAN_PEER_NODE_ID),
               (pdt_us > 0u) ? (float)pdt_us * 1.0e-6f : P2P_TS_S);
     }
@@ -369,15 +460,16 @@ static void RunLaw(bool peer_fresh) {
     float const c = s_couple.p2p_comp;
     s_couple.f_own =
         -(s_couple.dob_own.d -
-          c * P2PFriction(P2P_FC_OF(CAN_NODE_ID), s_couple.own_vel));
+          c * P2PFriction(s_ripple[CAN_NODE_ID].fc, s_couple.own_vel));
     s_couple.f_peer =
         -(s_couple.dob_peer.d -
-          c * P2PFriction(P2P_FC_OF(CAN_PEER_NODE_ID), s_couple.peer_vel));
+          c * P2PFriction(s_ripple[CAN_PEER_NODE_ID].fc, s_couple.peer_vel));
     float const ddx =
         0.5f * (s_couple.p2p_kf * (s_couple.f_own + s_couple.f_peer) -
                 s_couple.p2p_kp * err_f - s_couple.p2p_kv * derr);
     raw = COUPLE_TORQUE_SIGN *
-          (ddx / P2P_G_OF(CAN_NODE_ID) + s_couple.dob_own.d);
+              (ddx / P2P_G_OF(CAN_NODE_ID) + s_couple.dob_own.d) +
+          s_couple.p2p_ripple * RippleAt(CAN_NODE_ID, s_couple.own_enc);
   } else {
     raw = -COUPLE_TORQUE_SIGN *
           (s_couple.kp * err_f + s_couple.kd * derr +
@@ -456,9 +548,9 @@ void Couple_Tick(const CAN_TickSample_t* s) {
       if (p2p) {
         /* Start both observers from this still state, so nothing read
            before RUN leaks into the first output. */
-        DobReset(&s_couple.dob_own, s_couple.own_iq, s_couple.own_vel,
+        DobReset(&s_couple.dob_own, s_couple.own_iq_eff, s_couple.own_vel,
                  P2P_G_OF(CAN_NODE_ID));
-        DobReset(&s_couple.dob_peer, s_couple.peer_iq, s_couple.peer_vel,
+        DobReset(&s_couple.dob_peer, s_couple.peer_iq_eff, s_couple.peer_vel,
                  P2P_G_OF(CAN_PEER_NODE_ID));
         s_couple.f_own = 0.0f;
         s_couple.f_peer = 0.0f;
@@ -592,8 +684,41 @@ bool Couple_SetP2PParam(uint8_t id, int32_t value) {
       }
       s_couple.p2p_fric_pct = value;
       break;
-    default:
-      return false;
+    case CAN_PARAM_P2P_RIPPLE_PCT:
+      if ((value < COUPLE_P2P_RIPPLE_PCT_MIN) ||
+          (value > COUPLE_P2P_RIPPLE_PCT_MAX)) {
+        return false;
+      }
+      s_couple.p2p_ripple_pct = value;
+      break;
+    default: {
+      /* Ripple tables: 32..50 node 0, 64..82 node 1. */
+      uint32_t node;
+      if ((id >= CAN_PARAM_P2P_TABLE_NODE0) &&
+          (id <= CAN_PARAM_P2P_TABLE_NODE0 + 2u * COUPLE_RIPPLE_N_HARM)) {
+        node = 0u;
+      } else if ((id >= CAN_PARAM_P2P_TABLE_NODE1) &&
+                 (id <= CAN_PARAM_P2P_TABLE_NODE1 + 2u * COUPLE_RIPPLE_N_HARM)) {
+        node = 1u;
+      } else {
+        return false;
+      }
+      uint32_t const k =
+          (uint32_t)id - (node ? CAN_PARAM_P2P_TABLE_NODE1 : CAN_PARAM_P2P_TABLE_NODE0);
+      if (k == 2u * COUPLE_RIPPLE_N_HARM) { /* Coulomb */
+        if ((value < 0) || (value > COUPLE_RIPPLE_FC_MAX_UA)) {
+          return false;
+        }
+        s_ripple[node].fc = 1.0e-6f * (float)value;
+      } else {
+        if ((value < -COUPLE_RIPPLE_COEF_MAX_UA) ||
+            (value > COUPLE_RIPPLE_COEF_MAX_UA)) {
+          return false;
+        }
+        s_ripple[node].ab[k] = 1.0e-6f * (float)value;
+      }
+      return true; /* nothing derived from the tables */
+    }
   }
   P2PDerive();
   return true;

@@ -526,3 +526,39 @@ millisecond kept only the last); p2p_teleop.py (run it); p2p_sim.py
 (offline model the defaults came from).
 
 BUILD: both configs, 0 warnings.
+
+===========================================================================
+CHANGE 10 (2026-11-19, JayPC; branch feature/p2p-dob-bilateral)
+P2P ripple (cogging) compensation from in-session tables
+===========================================================================
+
+WHY: first hand test of P2P (user): "a lot of cogging". In the log both
+motors carry 24-39 mA rms of angle-locked ripple (B: 12/rev 38 mA, 7/rev
+24, 14/rev 23; A: 7/rev 25, 12/rev 14, 28/rev 12). Each observer reports
+its motor's ripple as external force, so the force servo hands BOTH
+motors' ripple to the hand. A fixed map cannot work (12/rev phase per
+power-up, 7/rev amplitude per START -- TEST_LOG 2026-10-26).
+
+WHAT (couple_ctrl.h "Ripple"):
+- Per node, a table over harmonics {1,7,12,14,24,28,36,42,84}/rev of the
+  raw count + Coulomb; both boards hold both nodes' tables.
+- ripple_pct p (SET_PARAM 8, 0..150, default 0 = off): observer input
+  i -> i - p*r(theta) for own AND peer (ripple stops looking like force),
+  and own output += p*r(theta_own) (feed-forward). The table's Coulomb
+  replaces the nominal one in the --fric compensation. 1/rev on arm A is
+  mostly gravity, so the arm's weight is cancelled too.
+- Tables: SET_PARAM 32..50 (node 0), 64..82 (node 1), int32 microamps,
+  coefficients |c| <= 0.3 A, Coulomb 0..0.2 A.
+- Evaluated with a quarter-wave sine table (4 KB RAM) built at boot, NOT
+  MCM_Trig_Functions(): that uses the hardware CORDIC, which the 16 kHz
+  FOC interrupt also uses and could preempt mid-operation.
+- Ripple is evaluated at the midpoint of each 1 ms interval for the
+  observers (half the phase error at 84/rev).
+
+PI SIDE: p2p_cal.py (simultaneous hands-off PD sweep of both motors,
+1.25 rev each way at 300 counts/s, leader_cal's trajectory and gains; fit;
+upload). p2p_teleop.py runs it after START by default (--no-cal skips,
+--ripple sets the %); the live force readout applies the same table.
+Offline check: firmware table evaluation == numpy cos/sin to 1e-14 A.
+
+BUILD: both configs 0 warnings; flashed on both.
