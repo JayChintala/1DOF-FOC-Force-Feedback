@@ -173,3 +173,39 @@ python3 p2p_sim.py --sweep    # gain sweeps
 2. Chirp / frequency-response test to measure the real plant, including the ~57 Hz mode, and fit it into the sim.
 3. Add a linear margin analysis (`python-control`) to explain the stability limit.
 4. Optional: gravity compensation for arm A in the RFOB, so its weight isn't felt as a force.
+
+---
+
+## 8. References: what the law is based on
+
+The law is the standard **acceleration-based four-channel bilateral control** from Kouhei Ohnishi's group at Keio University, built from three pieces. Citations were checked against bibliographic databases on 2026-11-19 (IEEE metadata mirrors, dblp, Crossref, Keio's research database, arXiv). Anything not confirmed is marked.
+
+### Disturbance observer: making each motor a nominal inertia (`DobStep()`)
+
+1. K. Ohishi, K. Ohnishi, K. Miyachi, "Torque-speed regulation of DC motor based on load torque estimation method," *Proc. International Power Electronics Conference (IPEC-Tokyo)*, Tokyo, Mar. 1983, IEE Japan, pp. 1209–1216 (some sources give 1209–1218). Generally credited as the origin of the disturbance observer. *Not checked against the original proceedings.*
+2. K. Ohnishi, M. Shibata, T. Murakami, "Motion control for advanced mechatronics," *IEEE/ASME Trans. Mechatronics*, vol. 1, no. 1, pp. 56–67, Mar. 1996. doi:10.1109/3516.491410. The standard reference for DOB-based **acceleration control**: once the disturbance is cancelled, every controller is designed as an acceleration reference.
+
+### Reaction force observer: force without a force sensor (the `f_k` terms)
+
+3. T. Murakami, F. Yu, K. Ohnishi, "Torque sensorless control in multidegree-of-freedom manipulator," *IEEE Trans. Industrial Electronics*, vol. 40, no. 2, pp. 259–265, 1993. One observer per joint for robust motion and a second for sensorless reaction-torque estimation.
+4. S. Katsura, Y. Matsumoto, K. Ohnishi, "Modeling of force sensing and validation of disturbance observer for force control," *IEEE Trans. Industrial Electronics*, vol. 54, no. 1, pp. 530–538, Feb. 2007. doi:10.1109/TIE.2006.885459. Shows observer-based force sensing can be wider-bandwidth than a physical force sensor; this is the trade-off behind the `--dob-g` knob.
+
+### Bilateral control: four channels and the two-mode split (`ddx = ½[…]`)
+
+5. B. Hannaford, "A design framework for teleoperators with kinesthetic feedback," *IEEE Trans. Robotics and Automation*, vol. 5, no. 4, pp. 426–434, 1989. The hybrid two-port model of teleoperators.
+6. D. A. Lawrence, "Stability and transparency in bilateral teleoperation," *IEEE Trans. Robotics and Automation*, vol. 9, no. 5, pp. 624–637, Oct. 1993. doi:10.1109/70.258054. Four channels are needed for transparency, and transparency trades off against robust stability under delay.
+7. W. Iida, K. Ohnishi, "Reproducibility and operationality in bilateral teleoperation," *Proc. 8th IEEE Int. Workshop on Advanced Motion Control (AMC 2004)*, Kawasaki, Japan, pp. 217–222, 2004. Defines the "reproducibility" and "operationality" performance indices for 4-channel bilateral control. *Abstract not checked; page numbers from a citing paper.*
+8. T. Shimono, S. Katsura, K. Ohnishi, "Abstraction and reproduction of force sensation from real environment by bilateral control," *IEEE Trans. Industrial Electronics*, vol. 54, no. 2, pp. 907–918, Apr. 2007. doi:10.1109/TIE.2007.892744. DOB-based bilateral control realizing action-reaction between master and slave. The common/differential mode split (`f_m + f_s → 0`, `x_m − x_s → 0`) is the standard form in this line of work. *That this specific paper presents the split via the Hadamard ("quarry") matrix is from memory, not checked against its full text.*
+
+### Related: bilateral control for robot learning
+
+9. T. Adachi, K. Fujimoto, S. Sakaino, T. Tsuji, "Imitation learning for object manipulation based on position/force information using bilateral control," *Proc. IEEE/RSJ IROS 2018*, Madrid, pp. 3648–3653. doi:10.1109/IROS.2018.8594489; arXiv:1811.03759. Uses 4-channel bilateral control to collect position + force demonstrations for imitation learning. The closest prior work to this project's robot-learning goal.
+10. T. Z. Zhao, V. Kumar, S. Levine, C. Finn, "Learning fine-grained bimanual manipulation with low-cost hardware," *Robotics: Science and Systems XIX*, Daegu, 2023. doi:10.15607/RSS.2023.XIX.016; arXiv:2304.13705. ALOHA/ACT. A useful contrast: leader-follower teleop without force feedback to the operator.
+
+### What is specific to this project (not from the papers above)
+
+- **Measured current in the observer.** The textbook DOB uses the current *reference*; here it uses the measured 1 ms mean Iq, so it stays correct when the output clamps at 0.8 A.
+- **Peer observer computed locally.** Each ESC computes the *peer's* observer from the peer's TELEM, instead of the peer transmitting its force estimate.
+- **Per-side inertia.** Each side converts to current with its own G (`ddx / G_own`), because arm A has 2.2× the inertia of B.
+- **Kf as felt inertia.** Kf is scaled to the apparent mass (`2/Kf`, 100 % = 2·G_B).
+- **Safety and tuning.** The Iq sanity gates, observer reset at engage, trip 6, and the default gains (from `p2p_sim.py`).
