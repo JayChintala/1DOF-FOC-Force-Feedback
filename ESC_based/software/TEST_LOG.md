@@ -5464,6 +5464,58 @@ hold-one-push-other, `--fric 100`), and a tap or HOLD test to find the
 
 ---
 
+## 2026-11-19: P2P with CHANGE 10 ripple calibration, 0.8 A (user hand test) — saturation gone; cogging cut on A, not on B
+
+**Before this (user, 0.4 A run, no cal):** "limited to 0.4 A" (the
+`--iq-max 0.4` first-run cap) and "a lot of cogging".
+- Saturated 33 % of ticks; gap p95 1527, max 1852 counts.
+- Angle-locked ripple: B 12/rev 38 mA, 7/rev 24 mA; A 7/rev 25 mA,
+  12/rev 14 mA.
+- The observers passed both motors' ripple to the hand as force, so
+  CHANGE 10 was built and flashed.
+
+**Run:** `p2p_teleop.py --duration 60 --kf 50 --dob-g 80` (Iq_max 0.8,
+ripple 100 %, in-session cal). Log:
+`logs/p2p_WN20_Z1_KF50_G80_FR0_R100_A0.8{.csv,_cal.csv,_cal.json}`.
+No trip.
+
+**Saturation and gap:** saturated **3.7 %** (was 33 %). Gap p50 3, p95
+67, max 892 counts (was p95 1527, max 1852). Force mismatch in contact
+10 %.
+
+**Calibration** (both motors, 1.25 rev each way, ~35 s):
+
+| motor | largest harmonics | angle-locked rms, raw → after fit |
+|---|---|---|
+| A | 12/rev 18.5, 28/rev 15.4, 7/rev 14.5, 1/rev 13.8 (gravity) mA | 28.2 → 13.9 mA |
+| B | 12/rev 36.2, 28/rev 13.0 mA | 28.6 → 10.7 mA |
+
+**Ripple left in the hand force during the run** (7–84/rev; = calibrated
+ripple − angle-locked part of iq − a/G; raw angle recovered from the cal
+log, which uses the same counter):
+
+| motor | rms, motor ripple → felt | per-harmonic notes |
+|---|---|---|
+| A | 24 → **14 mA** | 12/rev 18 → 11, 36/rev 11 → 3 |
+| B | 29 → **31 mA (no gain)** | 12/rev 36 → 27, but 7/rev **6 → 20** |
+
+**Why B didn't improve (inferred):**
+- **7/rev warm-up growth:** B's 7/rev grows after START (2026-10-28:
+  τ ≈ 160 s, ~65 mA warm). The cal ran right after START, cold (6 mA),
+  so the table under-cancels it as the run warms.
+- **Cross-talk:** with the shafts locked together, each motor's
+  harmonics also show up at the other's angle, so each line carries some
+  of the other motor's residual.
+- **No clean baseline:** there is no back-to-back `--no-cal` run at
+  0.8 A in the same power-up, so "felt" numbers are against the cal table,
+  not a measured uncompensated run.
+
+**Next:** the user's feel verdict; a back-to-back `--no-cal` run for a
+clean A/B; and, if the 7/rev drift is confirmed, a warm-up before the cal
+(teleop used 300 s) or a re-cal mid-session.
+
+---
+
 ## Phase A summary (2026-10-20)
 
 | Step | Result | Key number |
