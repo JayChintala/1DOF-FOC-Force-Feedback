@@ -270,6 +270,12 @@ def main():
         print(f"Engaged. Logging to {log_path}. Ctrl+C to stop.\n"
               "One hand per shaft: move one and the other follows; hold one and "
               "push the other to feel it.\n")
+        # Re-zero at engagement: START re-aligns the encoders (counter load),
+        # so counts captured before START carry an arbitrary offset.
+        drain()
+        pos0.update({n: i.get_telemetry()["enc_count_unwrapped"] for n, i in ifaces.items()})
+        for n in names:
+            summary_rows[n].clear()
         t_eng = time.monotonic()
         next_print = t_eng
         while args.duration == 0 or time.monotonic() - t_eng < args.duration:
@@ -313,7 +319,7 @@ def main():
             print("No data logged -- log discarded.")
         else:
             summ = summarize(summary_rows, args)
-            config = {"law": "p2p", "wn_hz": args.wn, "zeta": args.zeta,
+            config = {"law": "p2p", "mode": "p2p", "motors": names, "wn_hz": args.wn, "zeta": args.zeta,
                       "kf_pct": args.kf, "dob_g": args.dob_g, "fric_pct": args.fric,
                       "iq_max": args.iq_max, "predict": args.predict,
                       "duration_s": args.duration, "trip": trip_msg, "summary": summ,

@@ -5426,6 +5426,44 @@ Compare with `coupling_monitor.py --kp 0.007 --kd 2.5e-5 --iq-max 0.8 --predict`
 
 ---
 
+## 2026-11-19: P2P first hardware runs (hands-off, 0.4 A cap) — stable, gap small; ~20 Hz common-mode wobble
+
+Firmware c12dd52 (CHANGE 9). ESC power was off at first (`zero_iq_check`
+"RUN never seen"); after the user switched it on: PASS (RUN Iq std 9.4 /
+9.1 mA). All four runs: 10 s, hands off, `--iq-max 0.4`, engaged
+throughout, **no trips, 0 % saturated**, worst peer age 0.6 ms.
+Logs: `logs/p2p_WN*_*.csv` on the Pi.
+
+| run | gap = DBG err, p50 / p95 / max | gap 40–90 Hz rms | common (A+B)/2 rms | common 10–30 Hz | max \|Iq\| A |
+|---|---|---|---|---|---|
+| wn 20, Kf 100, g 150 (defaults) | 3 / 10 / 22 cnt | 2.59 | 15.8 cnt | 13.8 | 0.216 A |
+| wn 20, Kf 50, g 150 | 3 / 9 / 19 | 2.54 | 8.0 | 5.8 | 0.182 |
+| wn 20, Kf 50, g 80 | 3 / 8 / 17 | 1.97 | 9.1 | 4.8 | 0.167 |
+| wn 15, Kf 50, g 80 | 3 / 10 / 20 | — | 7.5 | 4.4 | 0.121 |
+
+- **Gap:** median 3 counts. Hands-off 40–90 Hz buzz in the gap is
+  2.0–2.6 cnt rms vs **7.72 for PEER** (11-15, same metric): about 3×
+  quieter.
+- **New problem: common-mode wobble.** Both shafts move together at
+  ~19.5 Hz (gap: ~21 Hz, plus ~30 and ~41 Hz). Halving Kf halves it.
+- **The peak does NOT move with wn** (20 → 15 Hz), so it is not the
+  position servo. **Inferred:** a fixed structural/mechanical mode
+  (arm A / mount?) that the observers' noise excites. Not yet proven: a
+  HOLD-mode or tap test on each arm alone would separate it.
+- **Sim miss:** `p2p_sim.py` predicted a quiet hands-off pair. It has no
+  structural modes, which fits this miss.
+- **Readout bug fixed:** `p2p_teleop.py` took its position zero before
+  START, but START re-aligns the encoders, so the printed gap had an
+  arbitrary offset (the ~15 counts in run 2). It now re-zeros at
+  engagement; all numbers above use the firmware's own `err`. Also fixed:
+  the plot crashed on the P2P JSON (missing `mode` / `motors`).
+
+**Next:** the user's hand tests at `--kf 50 --dob-g 80` (free motion,
+hold-one-push-other, `--fric 100`), and a tap or HOLD test to find the
+20 Hz source.
+
+---
+
 ## Phase A summary (2026-10-20)
 
 | Step | Result | Key number |
