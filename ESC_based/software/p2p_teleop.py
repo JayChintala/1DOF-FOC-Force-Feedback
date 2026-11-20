@@ -69,6 +69,16 @@ VEL_ALPHA = 0.5                      # COUPLE_VEL_FILTER_ALPHA
 WN_HZ, ZETA, KF_PCT, DOB_G, FRIC_PCT = 20.0, 1.0, 100, 150, 0
 IQ_MAX_A = 0.8
 PRINT_PERIOD_S = 0.2
+
+# --guide: timed cues so A/B runs get the SAME movements (p2p_ab.py analyses
+# them per phase). Slow steady turns are where cogging is felt and where the
+# angle-locked analysis is reliable. (start s, end s, name, cue)
+GUIDE = [
+    (0, 5, "settle", "HANDS OFF both shafts."),
+    (5, 25, "slow_B", "Turn B SLOWLY and steadily (~1 turn per 4 s), back and forth. Hand OFF A."),
+    (25, 45, "slow_A", "Turn A SLOWLY and steadily (~1 turn per 4 s), back and forth. Hand OFF B."),
+    (45, 60, "push", "HOLD B firmly; push A back and forth (firm, not violent)."),
+]
 NEWTON_PER_A = 1.058                 # tip force per amp (TEST_LOG 2026-11-15)
 
 
@@ -84,6 +94,8 @@ def parse_args():
     p.add_argument("--warmup", type=float, default=0.0,
                    help="seconds at 0 A in RUN before the ripple cal (7/rev grows "
                         "as the boards warm: tau ~160 s; 300 s ~ 85 %%)")
+    p.add_argument("--guide", action="store_true",
+                   help="60 s of timed cues (slow B, slow A, hold-and-push) for A/B runs")
     p.add_argument("--no-cal", action="store_true",
                    help="skip the ~35 s ripple calibration (ripple comp off)")
     p.add_argument("--iq-max", type=float, default=IQ_MAX_A, help="A, <= 0.8")
@@ -109,6 +121,8 @@ def parse_args():
         p.error("--warmup must be >= 0")
     if a.warmup and a.no_cal:
         p.error("--warmup only applies to the ripple cal (drop --no-cal)")
+    if a.guide:
+        a.duration = float(GUIDE[-1][1])
     if not 0 <= a.ripple <= 150:
         p.error("--ripple must be 0..150 %")
     if not 0 < a.iq_max <= 0.8:
@@ -168,8 +182,8 @@ class MirrorObserver:
         return self.f
 
 
-def readout(t_rel, ifaces, pos0, obs):
-    parts = [f"t={t_rel:6.1f}s"]
+def readout(t_rel, ifaces, pos0, obs, tag=""):
+    parts = [f"t={t_rel:6.1f}s" + (f" {tag}" if tag else "")]
     pos = {}
     for n, iface in ifaces.items():
         tel = iface.get_telemetry()
@@ -252,6 +266,7 @@ def main():
                                         "f": f, "engaged": eng})
 
     pos0 = {}
+    engage_mcu_us = None
     try:
         if not wait_for(lambda: all(i.get_telemetry()["enc_count_unwrapped"] is not None
                                     for i in ifaces.values()), TELEM_TIMEOUT_S):
@@ -342,12 +357,23 @@ def main():
         for n in names:
             summary_rows[n].clear()
         t_eng = time.monotonic()
+        engage_mcu_us = {n: i.get_telemetry()["mcu_time_us"] for n, i in ifaces.items()}
         next_print = t_eng
+        phase = None
         while args.duration == 0 or time.monotonic() - t_eng < args.duration:
             drain()
             now = time.monotonic()
+            tag = ""
+            if args.guide:
+                el = now - t_eng
+                cur = next((g for g in GUIDE if g[0] <= el < g[1]), GUIDE[-1])
+                if cur is not phase:
+                    phase = cur
+                    print(f"\n>>> {cur[2].upper()} ({cur[1] - cur[0]} s): {cur[3]}\n",
+                          flush=True)
+                tag = f"[{cur[2]} {cur[1] - el:4.1f}s]"
             if now >= next_print:
-                readout(time.time() - t_start, ifaces, pos0, obs)
+                readout(time.time() - t_start, ifaces, pos0, obs, tag)
                 next_print = now + PRINT_PERIOD_S
             for n, iface in ifaces.items():
                 d = iface.get_debug()
@@ -388,6 +414,9 @@ def main():
                       "kf_pct": args.kf, "dob_g": args.dob_g, "fric_pct": args.fric,
                       "ripple_pct": 0 if args.no_cal else args.ripple,
                       "warmup_s": args.warmup,
+                      "guide": ([{"name": g[2], "start_s": g[0], "end_s": g[1]} for g in GUIDE]
+                                if args.guide else None),
+                      "engage_mcu_us": engage_mcu_us if pos0 and started else None,
                       "iq_max": args.iq_max, "predict": args.predict,
                       "duration_s": args.duration, "trip": trip_msg, "summary": summ,
                       "started": time.strftime("%Y-%m-%d %H:%M:%S",
