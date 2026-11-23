@@ -135,6 +135,28 @@ The phase times are saved in the run's JSON (`guide`, `engage_mcu_us`). `p2p_ab.
 
 A phase whose turning covers < 95 % of the circle is reported as "insufficient coverage" instead of a number.
 
+## P2P vs the old teleop controller: protocol and baselines (set up 2026-11-22)
+
+**Roles:** the operator holds **B only** (teleop's leader); A touches the environment (teleop's follower). Each run uses `p2p_teleop.py --guide <routine> --surface <what A touches>` at the operating point `--kf 50 --dob-g 80`. Taps and contact runs pause after the ripple calibration so the surface can be placed under A; the calibration swings A 1.25 turns.
+
+| Run | Command flags | Phases |
+|---|---|---|
+| Free space | `--guide free --surface air` | 30 s free motion with B; A touches nothing |
+| Taps | `--guide taps --surface rigid` | 30 s of discrete taps of A onto the rigid stop |
+| Contact, rigid | `--guide contact --surface rigid` | 20 s slow presses, 8 s gentle hold, 8 s firm hold |
+| Contact, sponge | `--guide contact --surface sponge` | The same, on the sponge |
+
+**Analysis:** `python3 p2p_compare.py <the four csv>`. Forces come from replaying the firmware observers on the logged data. Definitions and detector code match the teleop evaluation scripts:
+
+| Metric | Teleop baseline (TEST_LOG) | P2P measure |
+|---|---|---|
+| Free-space RMS | `iq_b_cmd` 18.7 mA (C3 op point); free felt 10.1 mA (HOLD3); 26.2 mA (run 21) | RMS of B's current, plus RMS of the hand-force estimate on B (B's current also carries its own friction/inertia cancellation, so the hand force is the fairer felt number) |
+| Tap rise | median 4.0 ms (C3 taps-only; p25 4, p75 34); original path 66 ms | `analyze_teleop_baseline.impacts()`, the same detector, on B's current and on the hand force |
+| Holds | plateau slope −0.03 / +0.02 A/s (HOLD3, contact spring); onset flips 2 | `hold_eval.py` definitions on \|f_A\|, plus static matching \|f_A + f_B\| / \|f_A\|. Teleop's "static ≤ 5 %" was measured against a scale, so this is an analogue, not the same test |
+| Rigid vs sponge | follower k 1.62 N/mm rigid (lower bound) vs 0.08 sponge (19.9×); leader travel to 0.7 N: 382 rigid / 473 sponge counts | `stiffness_eval.py` definition on A, plus B's travel from contact to 0.7 N |
+
+**Results:** pending (runs not done yet).
+
 ---
 
 ## Open issues
