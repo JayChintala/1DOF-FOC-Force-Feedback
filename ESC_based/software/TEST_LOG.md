@@ -5516,7 +5516,7 @@ clean A/B; and, if the 7/rev drift is confirmed, a warm-up before the cal
 
 ---
 
-## 2026-11-23: Motor parameters vs MC Workbench — Ke/Kt correct (≈ 2 %); inertia measured; Rs pending (needs a stall)
+## 2026-11-23: Motor parameters vs MC Workbench — Ke/Kt correct (≈ 2 %), Rs 10–14 % low, inertia measured; Kt vs scale calibration disagree 39 % (open)
 
 **Why:** the user asked whether the Workbench-derived motor parameters are
 right. Pole pairs (7) and PPR are known to be correct.
@@ -5563,12 +5563,55 @@ right. Pole pairs (7) and PPR are known to be correct.
 - **The arm-free rotor inertia is about 4.2e-6 kg·m².** If Workbench's unit is
   kg·cm², it assumed about 7× that (unconfirmed), but no firmware path uses it.
 
-**Pending:**
-- **Rs**, which sets the current-loop gains. It needs a blocked shaft: A
+**Stall (Rs), user at the bench, 00:52:**
+- A was held against the rigid stop (`--sign -1`); B's handle was held by hand,
+  both signs. Each motor's first attempt aborted at 0.1 A ("shaft moved ~43
+  counts: not blocked") before being held; the retries were clean.
+- Current tracked to within 2 % at every step.
+
+| | Vq at 0.10 / 0.20 / 0.30 A | **Rs** (fit Vq = Rs·Iq + c) | vs Workbench 5.29 Ω |
+|---|---|---|---|
+| A (one sign) | 0.50 / 0.91 / 1.40 V | **4.53 Ω** | −14 % |
+| B (both signs) | 0.48–0.49 / 0.95–0.96 / 1.43–1.45 V | **4.78 Ω** (c 16 mV) | −10 % |
+
+- **Rs is about 10–14 % lower than Workbench's value.** This is the dq
+  resistance, so it includes the FETs, shunt and wiring, measured with the
+  windings warm from the spin tests. A cold motor would read slightly lower
+  still.
+- **Effect on the current loop:** Ki/Kp = Rs/Ls sets the PI zero. A 10–14 %
+  low Rs puts the zero slightly above the plant pole. That's a small slowing
+  of the current loop's tail, not instability; not worth retuning on its own.
+- **Ls** still unmeasured.
+
+**Open: Kt from back-EMF disagrees with the scale calibration by about 39 %.**
+- Back-EMF gives Kt = 57.6 mN·m/A (A). At the arm's r = 75.7 mm that predicts
+  0.76 N/A at the tip.
+- B7 (2026-11-15) measured **1.058 N/A**, i.e. 80.1 mN·m/A at 75.7 mm.
+- Two explanations, both cheap to check:
+  1. The scale contact was not at 75.7 mm. A 54 mm lever would close the gap.
+  2. The current scale reads low: the true current would be about 1.39× the
+     reported one, which would also make the true Rs about 3.3 Ω.
+     `AMPLIFICATION_GAIN` 9.14 (16× PGA) is set by hand and nothing ties it to
+     the hardware.
+- **The decisive check:** a multimeter, phase to phase, with the motor
+  unplugged from the ESC. About 9.0–9.6 Ω line-to-line means the current
+  scale is right and the gap is geometry; about 6.6 Ω means the current scale
+  is off.
+- Back-EMF (λ) is voltage-based and doesn't depend on the current scale. Rs,
+  G and the derived J all do.
+
+**P2P restored and verified:**
+- 00:48: full in-session calibration plus 10 s hands-off at the operating
+  point. Calibration matched earlier sessions; no trips; gap p50 1, max 10.
+- After the stall tests: 8 s `--no-cal` engagement check; gap p50 2, max 13.
+- Nothing about P2P changed. CHANGE 11 is diagnostic only, and the
+  SET_PARAMs are re-sent on every run.
+
+**Remaining:** It needs a blocked shaft: A
   against the rigid stop, and/or B held firmly.
   `motor_params.py stall --node A --sign ±1`; `stall --node B` (both signs, hand-held).
 - **Ls** needs a 16 kHz current-step capture (not in the firmware).
-- Afterwards, restore and verify P2P (`p2p_teleop.py --kf 50 --dob-g 80`).
+- The multimeter phase-to-phase check above.
 
 Logs: `logs/motor_params_spin_{B,A}_20261123_*.csv/.json` on the Pi.
 
