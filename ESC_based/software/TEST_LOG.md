@@ -5516,6 +5516,64 @@ clean A/B; and, if the 7/rev drift is confirmed, a warm-up before the cal
 
 ---
 
+## 2026-11-23: Motor parameters vs MC Workbench — Ke/Kt correct (≈ 2 %); inertia measured; Rs pending (needs a stall)
+
+**Why:** the user asked whether the Workbench-derived motor parameters are
+right. Pole pairs (7) and PPR are known to be correct.
+
+**What the firmware uses** (torque mode, encoder; `pmsm_motor_parameters.h`):
+- Rs 5.29 Ω and Ls 1.058 mH set the current-loop PI gains (`PID_TORQUE_KP/KI`;
+  these were later rescaled by hand for the 16× PGA).
+- Ke 5.0 Vrms/krpm is informational: no feed-forward, no sensorless observer.
+- **Inertia and friction are not in the firmware at all.** Workbench only uses
+  them for the speed-loop gains, which torque mode never runs. Its UI values
+  (`MCWorkbench.ioc.wb`): `WB_UI_INERTIA` 0.291, `WB_UI_FRICTION` 0.937.
+- `MCWorkbench.stwb6` holds a different, unused motor entry (rs 10, ls 1.5,
+  inertia 0.55).
+
+**Tooling:**
+- Firmware **CHANGE 11** (a8385e0): new DIAG3 frame with bus voltage and the
+  100 ms means of Vq, Vd, Iq. Flashed on both; `zero_iq_check` PASS. Vbus
+  12.47 V (A), 12.60 V (B).
+- `motor_params.py spin | stall | fit`.
+- Voltage scale from `PWMC_SetPhaseVoltage`: phase-peak V = s16/32768 ×
+  Vbus/√3. Fit: Vq = λ·ωe + Rs·Iq + c·sign.
+
+**Spin, motor B** (bare handle; position-tracked ramp, leader_cal's PD gains):
+- 0.5–4 rev/s each way. Fit residual 11 mV.
+- The slope rises with speed and levels off above 2 rev/s (4.4 → 5.1 → 5.6 →
+  5.8 mV·s/rad). Low speeds are biased by stick-slip and dead-time.
+- **The 2–4 rev/s fit gives λ = 5.585 (Rs free) / 5.568 (Rs fixed) mV·s/rad,
+  vs Workbench 5.569.** The all-speed fit's −4 % is that low-speed bias.
+
+**Spin, motor A** (with arm):
+- 0.25–1.5 rev/s gave −11.5 %, from the same low-speed bias.
+- **2–3 rev/s: λ = 5.398 (Rs free) / 5.482 (Rs fixed), residual 1.3 mV.**
+- At the same speed A and B apply nearly the same Vq: 2 rev/s 0.61 vs 0.59 V,
+  3 rev/s 0.85 vs 0.83 V.
+
+| | λ (mV·s/rad) | Ke (Vrms/krpm) | Kt (mN·m/A) | J = Kt / G (kg·m²) |
+|---|---|---|---|---|
+| Workbench | 5.569 | 5.00 | 58.5 | 0.291 in its UI (2.9e-5 if the unit is kg·cm²) |
+| Motor B, ≥ 2 rev/s, Rs fixed | 5.568 | 5.00 | 58.5 | **4.19e-6** |
+| Motor A (with arm), ≥ 2 rev/s, Rs fixed | 5.482 | 4.92 | 57.6 | **8.98e-6** (the arm adds about 4.8e-6) |
+
+**Verdict so far:**
+- **Ke/Kt are correct to within about 2 %** on both motors.
+- **The arm-free rotor inertia is about 4.2e-6 kg·m².** If Workbench's unit is
+  kg·cm², it assumed about 7× that (unconfirmed), but no firmware path uses it.
+
+**Pending:**
+- **Rs**, which sets the current-loop gains. It needs a blocked shaft: A
+  against the rigid stop, and/or B held firmly.
+  `motor_params.py stall --node A --sign ±1`; `stall --node B` (both signs, hand-held).
+- **Ls** needs a 16 kHz current-step capture (not in the firmware).
+- Afterwards, restore and verify P2P (`p2p_teleop.py --kf 50 --dob-g 80`).
+
+Logs: `logs/motor_params_spin_{B,A}_20261123_*.csv/.json` on the Pi.
+
+---
+
 ## Phase A summary (2026-10-20)
 
 | Step | Result | Key number |

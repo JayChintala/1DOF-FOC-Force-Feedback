@@ -16,8 +16,8 @@ Physics (amplitude-invariant dq frame, encoder-commutated FOC, Id = 0):
     Ke [Vrms ph-ph per krpm] = lambda * sqrt(3/2) * pp * 2*pi*1000/60
     J = Kt / G_rad, with G the measured plant gain (TEST_LOG 2026-11-15)
 
-spin:  velocity PI in direct SET_IQ mode at 500 Hz, each speed in both
-       directions; DIAG3 rows from the steady part of each step. Fit
+spin:  position tracking of a ramped constant-speed trajectory (direct SET_IQ,
+       500 Hz, leader_cal's PD), each speed in both directions; DIAG3 rows from the steady part of each step. Fit
        Vq = lambda*we + Rs*Iq + c*sign(we). Iq is small (friction only), so
        Rs is weakly determined here -- use stall for Rs.
 stall: shaft blocked; steady Iq steps of both signs (A: one sign, into the
@@ -45,6 +45,10 @@ IQ_MAX = 0.3
 RATE_HZ = 500
 SETTLE_S = 1.5
 STALL_MOVE = 40          # counts
+SPIN_KP, SPIN_KD = 1e-3, 1.2e-5   # leader_cal.py / p2p_cal.py gains
+SPIN_ACCEL = 8000.0      # counts/s^2 ramp to each speed
+SPIN_SETTLE_S = 0.8      # after the ramp, before averaging
+SPIN_MAX_LAG = 400       # counts
 
 
 def lam_from_ke(ke):
@@ -145,6 +149,16 @@ class Rig:
         if tel["last_rx_time"] is None or time.time() - tel["last_rx_time"] > 0.05:
             raise RuntimeError("stale telemetry")
 
+    def wait_x(self):
+        t0 = time.time()
+        while True:
+            self.poll()
+            if self.x is not None:
+                return self.x
+            if time.time() - t0 > 0.5:
+                raise RuntimeError("no encoder frames")
+            time.sleep(0.005)
+
     def stop(self):
         try:
             self.i.send_set_iq(0.0)
@@ -157,34 +171,39 @@ class Rig:
 
 
 def run_spin(rig, speeds_rev_s, dwell):
-    """Velocity PI per step; returns step summaries and raw DIAG3 rows."""
-    g = G_MEAS[rig.n]
-    kp = 30.0 / g          # ~30 rad/s velocity bandwidth
-    ki = kp * 8.0
+    """Position tracking of a ramped constant-speed trajectory (leader_cal's
+    PD gains): a stiff position loop drags the shaft through its cogging
+    detents at an exact average speed, where a velocity PI stick-slips
+    (2026-11-23: wound up to ~60 mA in the detents, then overshot)."""
     steps, raw = [], []
     targets = [s * sgn for s in speeds_rev_s for sgn in (+1, -1)]
     dt = 1.0 / RATE_HZ
     for tgt in targets:
         vref = tgt * ENC
-        integ = 0.0
+        ramp = abs(vref) / SPIN_ACCEL
+        x0 = rig.wait_x()
         t0 = deadline = time.monotonic()
         v_samples = []
         while True:
             el = time.monotonic() - t0
-            if el > SETTLE_S + dwell:
+            if el > ramp + SPIN_SETTLE_S + dwell:
                 break
+            if el < ramp:
+                xr, vr = x0 + 0.5 * (vref / ramp) * el * el, vref * el / ramp
+            else:
+                xr, vr = x0 + 0.5 * vref * ramp + vref * (el - ramp), vref
             rig.poll()
-            if abs(rig.v) > 1.6 * abs(vref) + 4000:
-                raise RuntimeError(f"speed {rig.v:.0f} counts/s runaway (target {vref:.0f})")
-            e = vref - rig.v
-            u = kp * e + integ
-            if abs(u) < IQ_MAX:
-                integ += ki * e * dt
-            u = max(-IQ_MAX, min(IQ_MAX, u))
-            rig.i.send_set_iq(u)
-            if el > SETTLE_S:
+            lag = xr - rig.x
+            # Lag is the runaway guard (a runaway leaves the trajectory at
+            # once); the speed estimate spikes as the shaft snaps between
+            # cogging detents, so it only gets a generous absolute ceiling.
+            if abs(lag) > SPIN_MAX_LAG or abs(rig.v) > 2 * abs(vref) + 20000:
+                raise RuntimeError(f"lag {lag:+.0f} counts / speed {rig.v:.0f} (target {vref:.0f})")
+            rig.i.send_set_iq(max(-IQ_MAX, min(IQ_MAX, SPIN_KP * lag + SPIN_KD * (vr - rig.v))))
+            steady = el > ramp + SPIN_SETTLE_S
+            if steady:
                 v_samples.append(rig.v)
-            if el <= SETTLE_S:
+            else:
                 rig.i.drain_diag3_history()        # discard the transient
             deadline += dt
             sl = deadline - time.monotonic()
@@ -192,8 +211,8 @@ def run_spin(rig, speeds_rev_s, dwell):
                 time.sleep(sl)
             else:
                 deadline = time.monotonic()
-        rows = rig.i.drain_diag3_history()
-        rows = rows[1:]                             # first may straddle the settle edge
+        rig.i.send_set_iq(0.0)
+        rows = rig.i.drain_diag3_history()[1:]     # first may straddle the edge
         if len(rows) < 5:
             raise RuntimeError("too few DIAG3 rows in a step")
         a = np.array(rows)
@@ -206,7 +225,7 @@ def run_spin(rig, speeds_rev_s, dwell):
         raw += [(tgt,) + tuple(r) for r in rows]
         print(f"  {tgt:+5.2f} rev/s: speed {vmean:+8.0f} (std {st['speed_std']:5.0f}) counts/s, "
               f"Vq {st['vq']:+.3f} V, Vd {st['vd']:+.3f} V, Iq {st['iq'] * 1e3:+6.1f} mA, Vbus {st['vbus']:.2f} V")
-    rig.i.send_set_iq(0.0)
+        time.sleep(0.5)                            # coast down between steps
     return steps, raw
 
 
@@ -216,8 +235,7 @@ def run_stall(rig, currents, sign):
     seq = []
     for c in currents:
         seq += [c * sign] if sign else [c, -c]
-    rig.poll()
-    x0 = rig.x
+    x0 = rig.wait_x()
     for iq in seq:
         t0 = deadline = time.monotonic()
         while time.monotonic() - t0 < SETTLE_S + 2.0:
