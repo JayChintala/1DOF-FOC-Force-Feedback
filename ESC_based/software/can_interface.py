@@ -101,6 +101,7 @@ OFFSET_TELEM = 0x012
 OFFSET_DBG = 0x100 + OFFSET_TELEM
 OFFSET_CALIB = 0x100 + 0x013    # CHANGE 4 diagnostics, outside the node block
 OFFSET_DIAG = 0x100 + 0x014
+OFFSET_DIAG3 = 0x100 + 0x016   # CHANGE 11: <HhhH... see _handle_message> Vbus mV, mean Vq, Vd (s16), Iq mA
 OFFSET_DIAG2 = 0x100 + 0x015   # CHANGE 7: <hHHH> Vq pre-limit, circle count, non-forced count, Tafter
 # DIAG flags byte -- CAN_DIAG_FLAG_* in can_driver.h (firmware 75a893b)
 DIAG_SECTOR5_FORCED = 1 << 0     # snapshot, same period as the sector byte
@@ -304,7 +305,7 @@ class _SharedBus:
         """Subscribe iface's telemetry IDs and make sure the RX thread runs."""
         with self._lock:
             arb_ids = [iface._id_telem, iface._id_dbg, iface._id_calib, iface._id_diag,
-                       iface._id_diag2]
+                       iface._id_diag2, iface._id_diag3]
 
             table = self._nodes.setdefault(channel, {})
             for arb_id in arb_ids:
@@ -420,6 +421,9 @@ class MotorCANInterface:
         self._id_calib = node_base + OFFSET_CALIB
         self._id_diag = node_base + OFFSET_DIAG
         self._id_diag2 = node_base + OFFSET_DIAG2
+        self._id_diag3 = node_base + OFFSET_DIAG3
+        self.diag3 = None
+        self.diag3_history = collections.deque(maxlen=20000)
         self._id_set_param = node_base + OFFSET_SET_PARAM
         self.diag2 = None
         self.diag2_history = collections.deque(maxlen=20000)
@@ -565,6 +569,17 @@ class MotorCANInterface:
                              "param_rejected": bool(flags & DIAG_PARAM_REJECTED),
                              "temp_c": temp, "time": now}
                 self.diag_history.append((now, vq, vd, sector, flags, temp))
+        elif msg.arbitration_id == self._id_diag3:
+            # CHANGE 11: 10 Hz means; volts = s16 / 32768 * Vbus / sqrt(3) (phase peak)
+            vbus_mv, vq, vd, iq_ma = struct.unpack("<Hhhh", msg.data)
+            now = time.time()
+            vb = vbus_mv / 1000.0
+            k = vb / 32768.0 / 3 ** 0.5
+            with self._lock:
+                self.diag3 = {"vbus_v": vb, "vq_s16": vq, "vd_s16": vd,
+                              "vq_v": vq * k, "vd_v": vd * k, "iq_a": iq_ma / 1000.0,
+                              "time": now}
+                self.diag3_history.append((now, vb, vq * k, vd * k, iq_ma / 1000.0))
         elif msg.arbitration_id == self._id_diag2:
             vq_pre, n_circle, n_nonforced, tafter = struct.unpack("<hHHH", msg.data)
             now = time.time()
@@ -654,12 +669,20 @@ class MotorCANInterface:
         with self._lock:
             return {"calib": dict(self.calib) if self.calib else None,
                     "diag": dict(self.diag) if self.diag else None,
-                    "diag2": dict(self.diag2) if self.diag2 else None}
+                    "diag2": dict(self.diag2) if self.diag2 else None,
+                    "diag3": dict(self.diag3) if self.diag3 else None}
 
     def drain_diag_history(self) -> list:
         with self._lock:
             out = list(self.diag_history)
             self.diag_history.clear()
+        return out
+
+    def drain_diag3_history(self) -> list:
+        """(rx_time, vbus_v, vq_v, vd_v, iq_a) rows since the last call (CHANGE 11)."""
+        with self._lock:
+            out = list(self.diag3_history)
+            self.diag3_history.clear()
         return out
 
     def save_diag2_history(self, path):

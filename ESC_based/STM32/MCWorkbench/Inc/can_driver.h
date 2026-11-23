@@ -76,6 +76,7 @@
 #define CAN_ID_CALIB(base) (0x100 + (base) + 0x013)
 #define CAN_ID_DIAG(base) (0x100 + (base) + 0x014)
 #define CAN_ID_DIAG2(base) (0x100 + (base) + 0x015) /* CHANGE 7(c) */
+#define CAN_ID_DIAG3(base) (0x100 + (base) + 0x016) /* CHANGE 11 */
 
 /* Standard-ID filter elements CAN_Driver_Init() configures: one range for
  * this node's commands, one exact match for the peer's TELEM. The FDCAN
@@ -212,6 +213,22 @@
 
 #define CAN_DIAG_DIVIDER 100u /* CALIB and DIAG each at 10 Hz */
 
+/* CHANGE 11: 1 = send DIAG3 (motor-parameter identification), 10 Hz on tick
+ * slot 3*CAN_DIAG_DIVIDER/4, the last free diagnostic slot. 8 bytes LE:
+ *   [0..1] uint16  bus voltage, mV (VBS average x ADC_REF / divider)
+ *   [2..3] int16   mean Vqd.q since the previous DIAG3, s16 units
+ *   [4..5] int16   mean Vqd.d, s16 units
+ *   [6..7] int16   mean Iqd.q, mA
+ * Means over RUN periods only (16 kHz, ~1600 per frame); all three zero if
+ * none. Phase-peak volts = s16 / 32768 * Vbus / sqrt(3) (PWMC_SetPhaseVoltage
+ * space-vector scaling), the same amplitude-invariant frame as Iq. */
+#ifndef CAN_DIAG3_FRAME
+#define CAN_DIAG3_FRAME 1
+#endif
+#if CAN_DIAG3_FRAME && !CAN_DIAG_FRAMES
+#error "CAN_DIAG3_FRAME needs CAN_DIAG_FRAMES"
+#endif
+
 #define CAN_DIAG_FLAG_SECTOR5_FORCED 0x01u /* snapshot: A+B read forced    */
 #define CAN_DIAG_FLAG_CIRCLE_SEEN    0x02u /* sticky: circle limit hit     */
 #define CAN_DIAG_FLAG_OFFSET_SW      0x04u /* OFFSET_CALIB_SWITCHING built */
@@ -312,5 +329,15 @@ typedef struct {
 } CAN_Diag2Sample_t;
 
 void Diag2_GetAndReset(CAN_Diag2Sample_t* out);
+
+/* DIAG3 means (CHANGE 11), same arrangement; raw s16 means. */
+typedef struct {
+  int16_t vq;
+  int16_t vd;
+  int16_t iq;
+  uint16_t n; /* RUN periods averaged, saturating */
+} CAN_Diag3Sample_t;
+
+void Diag3_GetAndReset(CAN_Diag3Sample_t* out);
 
 #endif /* CAN_DRIVER_H */

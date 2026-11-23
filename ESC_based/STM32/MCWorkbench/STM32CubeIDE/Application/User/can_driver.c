@@ -29,6 +29,11 @@
 #include "mc_config.h"      /* PIDIqHandle_M1, PIDIdHandle_M1 (CHANGE 8) */
 #include "pid_regulator.h"  /* PID_SetKP, PID_SetKI */
 #include "drive_parameters.h" /* PID_TORQUE_KP/KI_DEFAULT */
+#if CAN_DIAG3_FRAME
+#include "bus_voltage_sensor.h"       /* VBS_GetAvBusVoltage_d (CHANGE 11) */
+#include "parameters_conversion.h"    /* ADC_REFERENCE_VOLTAGE */
+#include "power_stage_parameters.h"   /* VBUS_PARTITIONING_FACTOR */
+#endif
 
 /* B4: TELEM Iq = mean of every 16 kHz sample since the previous TELEM
    (IqTelem_GetMeanAndReset, raw s16A, scaled to Amps). 0 = the old raw
@@ -677,6 +682,33 @@ static void SendDiag2(void) {
   }
 }
 #endif
+#if CAN_DIAG3_FRAME
+/* CHANGE 11 -- layout in can_driver.h. */
+static void SendDiag3(void) {
+  CAN_Diag3Sample_t d;
+  Diag3_GetAndReset(&d);
+  float const vbus_v = (float)VBS_GetAvBusVoltage_d(&BusVoltageSensor_M1._Super) *
+                       (float)(ADC_REFERENCE_VOLTAGE / VBUS_PARTITIONING_FACTOR) / 65536.0f;
+  float const vbus_mv = vbus_v * 1000.0f;
+  uint16_t const vbus = (vbus_mv > 65535.0f) ? 65535u : (uint16_t)vbus_mv;
+  float ma = (float)d.iq * scaleParams_M1.current * 1000.0f;
+  if (ma > (float)INT16_MAX) ma = (float)INT16_MAX;
+  if (ma < (float)INT16_MIN) ma = (float)INT16_MIN;
+  int16_t const iq_ma = (int16_t)ma;
+
+  uint8_t payload[8];
+  memcpy(&payload[0], &vbus, sizeof(uint16_t));
+  memcpy(&payload[2], &d.vq, sizeof(int16_t));
+  memcpy(&payload[4], &d.vd, sizeof(int16_t));
+  memcpy(&payload[6], &iq_ma, sizeof(int16_t));
+
+  FDCAN_TxHeaderTypeDef hdr;
+  FillTxHeader(&hdr, CAN_ID_DIAG3(CAN_NODE_BASE));
+  if (HAL_FDCAN_AddMessageToTxFifoQ(s_hfdcan, &hdr, payload) != HAL_OK) {
+    s_diagTxDropCount++;
+  }
+}
+#endif
 #endif /* CAN_DIAG_FRAMES */
 
 /* The scheduler starts running this hook inside MX_MotorControl_Init(),
@@ -705,6 +737,11 @@ void CAN_ControlTick(void) {
 #if CAN_DIAG2_FRAME
   else if (diagSlot == (CAN_DIAG_DIVIDER / 4u)) {
     SendDiag2();
+  }
+#endif
+#if CAN_DIAG3_FRAME
+  else if (diagSlot == (3u * CAN_DIAG_DIVIDER / 4u)) {
+    SendDiag3();
   }
 #endif
   if (++diagSlot >= CAN_DIAG_DIVIDER) {

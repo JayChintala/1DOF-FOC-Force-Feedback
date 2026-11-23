@@ -562,3 +562,21 @@ upload). p2p_teleop.py runs it after START by default (--no-cal skips,
 Offline check: firmware table evaluation == numpy cos/sin to 1e-14 A.
 
 BUILD: both configs 0 warnings; flashed on both.
+
+===========================================================================
+CHANGE 11 (2026-11-23, JayPC; branch feature/p2p-dob-bilateral)
+DIAG3 frame: bus voltage + 100 ms means of Vq, Vd, Iq (motor-parameter ID)
+===========================================================================
+
+WHY: check the MC Workbench motor parameters (Rs, Ke) on the hardware. The
+applied voltage is already known to the firmware, but DIAG carries only a
+single 16 kHz snapshot of Vqd and no bus voltage, so volts can't be computed.
+
+WHAT: mc_tasks_foc.c Diag_UpdateHF() sums Vqd.q, Vqd.d, Iqd.q over RUN periods;
+can_driver.c sends DIAG3 (0x100 + base + 0x016) at 10 Hz on the last free
+diagnostic slot (3/4 of CAN_DIAG_DIVIDER): uint16 Vbus mV, int16 mean Vq and
+Vd (s16), int16 mean Iq mA. Phase-peak volts = s16/32768 * Vbus/sqrt(3).
+Behind CAN_DIAG3_FRAME (default 1). Telemetry only; no control path changed.
+
+PI SIDE: can_interface.py parses DIAG3 (get_diag()["diag3"],
+drain_diag3_history()); motor_params.py (spin / stall / fit).

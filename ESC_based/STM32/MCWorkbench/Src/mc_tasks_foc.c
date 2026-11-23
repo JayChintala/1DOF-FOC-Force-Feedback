@@ -146,6 +146,15 @@ static volatile uint16_t s_diag2CircleCnt   = 0u;
 static volatile uint16_t s_diag2NonForcedCnt = 0u;
 #endif
 
+#if CAN_DIAG3_FRAME
+/* CHANGE 11: sums for the DIAG3 means, RUN periods only. 1600 periods of
+   |s16| <= 32767 fit an int32 with room to spare. */
+static volatile int32_t  s_d3Vq = 0;
+static volatile int32_t  s_d3Vd = 0;
+static volatile int32_t  s_d3Iq = 0;
+static volatile uint32_t s_d3N  = 0u;
+#endif
+
 /* USER CODE END Private Variables */
 
 /* Private functions ---------------------------------------------------------*/
@@ -223,6 +232,15 @@ void Diag_UpdateHF(void)
   /* CHANGE 7(b): PWM-on periods outside RUN (encoder ALIGNMENT on the first
      START after reset) no longer reach the flags. */
   bool const run = (RUN == Mci[M1].State);
+#if CAN_DIAG3_FRAME
+  if (run && (s_d3N < 60000u))
+  {
+    s_d3Vq = s_d3Vq + v.q;
+    s_d3Vd = s_d3Vd + v.d;
+    s_d3Iq = s_d3Iq + FOCVars[M1].Iqd.q;
+    s_d3N = s_d3N + 1u;
+  }
+#endif
 #if DIAG_FLAGS_RUN_ONLY
   bool const flagsOn = sampling && run;
 #else
@@ -293,6 +311,24 @@ void Diag2_GetAndReset(CAN_Diag2Sample_t *out)
   s_diag2NonForcedCnt = 0u;
 
   __set_PRIMASK(primask);
+}
+#endif
+
+#if CAN_DIAG3_FRAME
+/* CHANGE 11: means since the previous DIAG3; clears the sums. */
+void Diag3_GetAndReset(CAN_Diag3Sample_t *out)
+{
+  uint32_t const primask = __get_PRIMASK();
+  __disable_irq();
+  int32_t const vq = s_d3Vq, vd = s_d3Vd, iq = s_d3Iq;
+  uint32_t const n = s_d3N;
+  s_d3Vq = 0; s_d3Vd = 0; s_d3Iq = 0; s_d3N = 0u;
+  __set_PRIMASK(primask);
+
+  out->n = (uint16_t)((n > 65535u) ? 65535u : n);
+  out->vq = (n > 0u) ? (int16_t)(vq / (int32_t)n) : 0;
+  out->vd = (n > 0u) ? (int16_t)(vd / (int32_t)n) : 0;
+  out->iq = (n > 0u) ? (int16_t)(iq / (int32_t)n) : 0;
 }
 #endif
 
