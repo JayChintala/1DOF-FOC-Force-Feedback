@@ -437,6 +437,13 @@ def edit_remaining_work(prs):
 
 def main():
     if not os.path.exists(BACKUP):
+        # The backup is local (git-ignored by omission). On a fresh clone the
+        # deck already has these slides; backing it up now would duplicate them.
+        if any(first_line(s) == "P2P vs Teleop: Scorecard" for s in Presentation(DECK).slides):
+            raise SystemExit("The deck already contains the P2P-vs-teleop slides and the "
+                             "pre-2026-11-22 backup is missing; refusing to add them twice. "
+                             "Edit the deck directly, or restore the backup from git history "
+                             "(the deck as of commit 8ecf246).")
         shutil.copy2(DECK, BACKUP)
         print("backed up ->", os.path.basename(BACKUP))
     shutil.copy2(BACKUP, DECK)          # always start pristine
