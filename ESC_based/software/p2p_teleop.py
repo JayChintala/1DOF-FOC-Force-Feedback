@@ -73,12 +73,38 @@ PRINT_PERIOD_S = 0.2
 # --guide: timed cues so A/B runs get the SAME movements (p2p_ab.py analyses
 # them per phase). Slow steady turns are where cogging is felt and where the
 # angle-locked analysis is reliable. (start s, end s, name, cue)
-GUIDE = [
-    (0, 5, "settle", "HANDS OFF both shafts."),
-    (5, 25, "slow_B", "Turn B SLOWLY and steadily (~1 turn per 4 s), back and forth. Hand OFF A."),
-    (25, 45, "slow_A", "Turn A SLOWLY and steadily (~1 turn per 4 s), back and forth. Hand OFF B."),
-    (45, 60, "push", "HOLD B firmly; push A back and forth (firm, not violent)."),
-]
+GUIDES = {
+    "ab": [
+        (0, 5, "settle", "HANDS OFF both shafts."),
+        (5, 25, "slow_B", "Turn B SLOWLY and steadily (~1 turn per 4 s), back and forth. Hand OFF A."),
+        (25, 45, "slow_A", "Turn A SLOWLY and steadily (~1 turn per 4 s), back and forth. Hand OFF B."),
+        (45, 60, "push", "HOLD B firmly; push A back and forth (firm, not violent)."),
+    ],
+    # Teleop comparison (Peer_to_Peer/testing.md): the operator holds B only,
+    # A is the "robot side" and touches the environment -- the same roles as
+    # teleop (leader B, follower A), so the metrics mean the same thing.
+    "free": [
+        (0, 5, "settle", "HANDS OFF. A must touch nothing for this whole run."),
+        (5, 35, "free", "Move B freely, like a normal teleop session: slow and fast moves, "
+                        "reversals. A stays in the air."),
+        (35, 40, "settle", "HANDS OFF."),
+    ],
+    "taps": [
+        (0, 5, "settle", "HANDS OFF. Rigid stop under A, A about 1 cm above it."),
+        (5, 35, "taps", "TAP A onto the rigid stop using B: quick taps, lift off fully "
+                        "between taps, about one tap per second."),
+        (35, 40, "settle", "HANDS OFF."),
+    ],
+    "contact": [
+        (0, 5, "settle", "HANDS OFF. Surface under A (rigid stop or sponge), A just above it."),
+        (5, 25, "presses", "SLOW PRESSES with B: press A into the surface over ~1 s to firm, "
+                           "release fully, repeat."),
+        (25, 33, "hold_gentle", "Press GENTLY and HOLD STEADY (about half force)."),
+        (33, 36, "release", "Release fully."),
+        (36, 44, "hold_firm", "Press FIRMLY and HOLD STEADY."),
+        (44, 48, "release", "Release fully. Then hands off."),
+    ],
+}
 NEWTON_PER_A = 1.058                 # tip force per amp (TEST_LOG 2026-11-15)
 
 
@@ -94,8 +120,11 @@ def parse_args():
     p.add_argument("--warmup", type=float, default=0.0,
                    help="seconds at 0 A in RUN before the ripple cal (7/rev grows "
                         "as the boards warm: tau ~160 s; 300 s ~ 85 %%)")
-    p.add_argument("--guide", action="store_true",
-                   help="60 s of timed cues (slow B, slow A, hold-and-push) for A/B runs")
+    p.add_argument("--guide", nargs="?", const="ab", choices=sorted(GUIDES),
+                   help="timed cues: ab (default, cogging A/B), free, taps, contact "
+                        "(teleop comparison, Peer_to_Peer/testing.md)")
+    p.add_argument("--surface", choices=["air", "rigid", "sponge"],
+                   help="what A touches in this run (logged; --guide contact needs it)")
     p.add_argument("--no-cal", action="store_true",
                    help="skip the ~35 s ripple calibration (ripple comp off)")
     p.add_argument("--iq-max", type=float, default=IQ_MAX_A, help="A, <= 0.8")
@@ -122,7 +151,9 @@ def parse_args():
     if a.warmup and a.no_cal:
         p.error("--warmup only applies to the ripple cal (drop --no-cal)")
     if a.guide:
-        a.duration = float(GUIDE[-1][1])
+        a.duration = float(GUIDES[a.guide][-1][1])
+    if a.guide == "contact" and not a.surface:
+        p.error("--guide contact needs --surface rigid|sponge")
     if not 0 <= a.ripple <= 150:
         p.error("--ripple must be 0..150 %")
     if not 0 < a.iq_max <= 0.8:
@@ -237,6 +268,8 @@ def main():
     base_name = (f"p2p_WN{args.wn:g}_Z{args.zeta:g}_KF{args.kf}_G{args.dob_g}"
                  f"_FR{args.fric}_R{0 if args.no_cal else args.ripple}"
                  f"{f'_W{args.warmup:g}' if args.warmup else ''}"
+                 f"{f'_{args.guide.upper()}' if args.guide and args.guide != 'ab' else ''}"
+                 f"{f'_{args.surface}' if args.surface else ''}"
                  f"_A{args.iq_max:g}{'_PRED' if args.predict else ''}")
     log_path = unique_log_path(base_name)
 
@@ -366,7 +399,8 @@ def main():
             tag = ""
             if args.guide:
                 el = now - t_eng
-                cur = next((g for g in GUIDE if g[0] <= el < g[1]), GUIDE[-1])
+                gd = GUIDES[args.guide]
+                cur = next((g for g in gd if g[0] <= el < g[1]), gd[-1])
                 if cur is not phase:
                     phase = cur
                     print(f"\n>>> {cur[2].upper()} ({cur[1] - cur[0]} s): {cur[3]}\n",
@@ -414,8 +448,9 @@ def main():
                       "kf_pct": args.kf, "dob_g": args.dob_g, "fric_pct": args.fric,
                       "ripple_pct": 0 if args.no_cal else args.ripple,
                       "warmup_s": args.warmup,
-                      "guide": ([{"name": g[2], "start_s": g[0], "end_s": g[1]} for g in GUIDE]
-                                if args.guide else None),
+                      "guide": ([{"name": g[2], "start_s": g[0], "end_s": g[1]}
+                                 for g in GUIDES[args.guide]] if args.guide else None),
+                      "guide_name": args.guide, "surface": args.surface,
                       "engage_mcu_us": engage_mcu_us if pos0 and started else None,
                       "iq_max": args.iq_max, "predict": args.predict,
                       "duration_s": args.duration, "trip": trip_msg, "summary": summ,
