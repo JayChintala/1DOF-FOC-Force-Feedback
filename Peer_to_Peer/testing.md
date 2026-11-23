@@ -155,13 +155,40 @@ A phase whose turning covers < 95 % of the circle is reported as "insufficient c
 | Holds | plateau slope −0.03 / +0.02 A/s (HOLD3, contact spring); onset flips 2 | `hold_eval.py` definitions on \|f_A\|, plus static matching \|f_A + f_B\| / \|f_A\|. Teleop's "static ≤ 5 %" was measured against a scale, so this is an analogue, not the same test |
 | Rigid vs sponge | follower k 1.62 N/mm rigid (lower bound) vs 0.08 sponge (19.9×); leader travel to 0.7 N: 382 rigid / 473 sponge counts | `stiffness_eval.py` definition on A, plus B's travel from contact to 0.7 N |
 
-**Results:** pending (runs not done yet).
+### Results, 2026-11-22 (user at the bench; P2P `--kf 50 --dob-g 80`, ripple cal 100 %, Iq max 0.8 A)
+
+**Logs (Pi):** `logs/p2p_WN20_Z1_KF50_G80_FR0_R100_{FREE_air,TAPS_rigid,CONTACT_rigid,CONTACT_sponge}_A0.8*`. The rigid contact run is `_2`; the first attempt stopped inside the calibration sweep (no `_cal` file, no trip), most likely because the stop was in A's path or a shaft was touched. **Analysis:** `p2p_compare.py` (four runs) and `p2p_feel.py` (felt free-space dynamics, same code on teleop and P2P logs). No trips in any run.
+
+| Metric | Teleop (old controller) | P2P | Verdict |
+|---|---|---|---|
+| **Free space: felt inertia** on the handle (fit of hand force = m·a + Fc·sign(v)) | 69 (C3), 47–68 (runs 22/27/28) nA per count/s² | **214**: matches the 225 predicted for Kf 50 % (2/Kf) | **P2P ~3–4× heavier** |
+| **Free space: felt friction** | 17 mA (C3), 4–6 mA (runs 22/27/28) | **28 mA** | P2P higher |
+| Free space: hand-force RMS (same observer, same intensity: \|a\| rms 0.12M vs 0.13M counts/s²) | 19.0 mA (C3) | **52.4 mA** | P2P heavier |
+| Free space: B current RMS (teleop's A1 definition) | 18.7 mA (C3) | 57.0 mA | Not like-for-like (see note) |
+| **Tap rise**, 10–90 %, B current (same `impacts()` detector) | 4.0 ms median (p25 4, p75 34) | **40.6 ms** median (p25 26, p75 62), 33 taps | **Teleop much faster** |
+| Tap rise, hand force | — | 61 ms | |
+| **Holds:** plateau slope of \|f_A\| | −0.03 / +0.02 A/s (with contact spring; −0.3 to −0.5 without) | rigid −0.08 to +0.08 A/s (most within ±0.01); sponge 5.9 s hold at 0.63 N: **+0.023 A/s** | **Equal: no fade, and P2P needs no contact spring** |
+| Holds: force matching \|f_A + f_B\| / \|f_A\| | (teleop: ≤ 5 % against a scale; a different test) | **0.6–5.9 %**, median ~3 % | Good |
+| Holds: onset sign flips | 2 | median 2 (0–5) | Equal |
+| **Stiffness at A** (`stiffness_eval` definition) | rigid ≥ 1.62 N/mm; sponge 0.08 (squishy foam 0.17) | rigid **0.53**; sponge **0.17** N/mm | Rigid lower in P2P (see note) |
+| **Handle travel, contact → 0.7 N** (operator side) | rigid 382 counts without the leader spring, **50 with it** (current teleop); sponge 473 (no spring) | **rigid 21, sponge 65 counts** | **P2P ~2.4× stiffer at the hand on rigid, and rigid vs soft shows up in the hand (3.1× travel ratio vs teleop's 1.24× without the spring)** |
+
+**Notes:**
+- **Free-space baseline correction.** Run 21's "free-space RMS 26.2 mA" (TEST_LOG 2026-11-15) is not a free-motion number: the handle moved about 100 counts in the whole run. Runs 24–26 also have too little free motion. Usable teleop free baselines: C3 (2026-10-25), and runs 22, 27, 28 (gentler, \|v\| rms 1.6–2.6k vs P2P's 6.0k).
+- **Why B's current isn't like-for-like.** Teleop's `iq_b_cmd` excludes the handle's own inertia and friction, which the hand pays passively. P2P's B current also cancels them. `p2p_feel.py` replays the same hand-force observer on both, which is the fair comparison.
+- **Why P2P is heavier in free space:** Kf 50 % sets the apparent mass to 2/Kf ≈ motor A's rotor, twice B's. The measurement (214) confirms the model (225). Kf 100 % would halve it but increased the ~20 Hz wobble. `--fric 100` should cut the felt friction; not tested yet.
+- **Why taps are slower:** the observer cutoff g = 80 rad/s (τ 12.5 ms, 10–90 % ≈ 27 ms) bounds P2P's force rise. It was lowered from 150 for the wobble. Teleop's 4 ms came through an unfiltered inertia term at impact (TEST_LOG C3).
+- **Holds at the ceiling.** Most holds were at the 0.8 A clamp (70–93 % saturated), despite the "gentle" cue. Only one sponge hold (5.9 s at 0.63 N, 16 % saturated) was a clean sub-ceiling hold.
+- **Rigid stiffness at A.** 0.53 vs 1.62 N/mm: A travelled 6 counts (0.7 mm) vs 3, close to encoder resolution. The cause is unconfirmed: a different stop or mounting, or force-estimate differences.
+- **The sponge result matches teleop's squishy foam (0.17 N/mm), not the 2026-10-29 sponge (0.08).** Which object was used is unconfirmed (asked the user).
+
+**Bottom line:** P2P wins on **contact**: the stiff hand at a rigid contact, rigid vs soft distinguishable at the hand, and holds that don't fade with no extra mechanism. Teleop wins on **free space** (about 3–4× lighter) and **tap crispness** (4 vs ~40 ms). Both P2P losses trace to the two gains backed off for the 20 Hz wobble (Kf 50 %, g 80), which is why that wobble is now the main thing to fix.
 
 ---
 
 ## Open issues
 
-1. **~20 Hz common-mode wobble** (hands off). Probably structural; not yet located.
+1. **~20 Hz common-mode wobble** (hands off). Probably structural; not yet located. **Now the top issue:** it forced Kf 50 % and g 80, which cost P2P its free-space lightness and tap crispness against teleop (2026-11-22 comparison).
 2. **Is B's residual cogging the 7/rev?** Varies per START; the warm-up A/B was inconclusive. Pending the guided A/B.
 3. **Transient gap under sudden pushes** (sim: ~81 counts for ~20 ms against a held shaft). Not yet measured on hardware.
 4. **Friction compensation (`--fric`)** has not been tried on hardware yet.

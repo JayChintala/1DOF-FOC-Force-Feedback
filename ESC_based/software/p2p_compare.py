@@ -58,13 +58,15 @@ MIN_PRESS_S = 0.3
 TELEOP = {
     "free_iq_b_rms_mA": (18.7, "C3 operating point, 2026-10-25 (felt 8.8 + damping 15.2)"),
     "free_felt_mA": (10.1, "HOLD3, 2026-10-26, hold_eval.py free felt"),
-    "free_iq_b_rms_run21_mA": (26.2, "run 21, 2026-11-15, whole-run free"),
+    # run 21's 26.2 mA (2026-11-15) is NOT a free-motion baseline: the handle
+    # moved ~100 counts in the whole run (found 2026-11-22).
     "tap_rise_ms": (4.0, "C3 taps-only, 2026-10-25 (p25 4, p75 34); original path 66 ms"),
     "hold_slope_A_s": ("-0.03 / +0.02", "HOLD3 with contact spring; -0.32/-0.52 without"),
     "onset_flips": (2, "HOLD3 median"),
     "k_rigid_N_mm": (1.62, "run 22, 2026-11-15 (lower bound; encoder-limited)"),
     "k_sponge_N_mm": (0.08, "run _16 sponge, 2026-10-29 (ratio 19.9x vs rigid)"),
     "leader_travel_rigid": (382, "run _14, 2026-10-29, contact -> 0.7 N, no leader spring"),
+    "leader_travel_rigid_spring": (50, "run _18, 2026-10-29, leader contact spring K_L 2e-3 (current teleop)"),
     "leader_travel_sponge": (473, "run _16, 2026-10-29"),
 }
 
@@ -263,7 +265,7 @@ def report(results):
         if "free" in r:
             f = r["free"]
             print(f"  free-space RMS of B's current: {f['iq_b_rms_mA']:.1f} mA   "
-                  f"(teleop {TELEOP['free_iq_b_rms_mA'][0]} mA; run 21 {TELEOP['free_iq_b_rms_run21_mA'][0]})")
+                  f"(teleop {TELEOP['free_iq_b_rms_mA'][0]} mA; see p2p_feel.py for a like-for-like comparison)")
             print(f"  hand force on B (RFOB) rms:    {f['hand_force_rms_mA']:.1f} mA   "
                   f"(teleop free felt {TELEOP['free_felt_mA'][0]} mA)")
             print(f"  |v_B| rms {f['v_b_rms']:.0f} counts/s, gap rms {f['gap_rms']:.1f} counts, "
@@ -293,7 +295,8 @@ def report(results):
         print(f"rigid vs sponge: k {kr:.2f} vs {ks_:.2f} N/mm -> ratio {kr / ks_:.1f}x "
               f"(teleop follower {TELEOP['k_rigid_N_mm'][0]} vs {TELEOP['k_sponge_N_mm'][0]}, 19.9x)")
         print(f"  operator side (B) travel to 0.7 N: rigid {br:.0f} vs sponge {bs:.0f} counts "
-              f"(teleop leader {TELEOP['leader_travel_rigid'][0]} vs {TELEOP['leader_travel_sponge'][0]})")
+              f"(teleop leader {TELEOP['leader_travel_rigid'][0]} vs {TELEOP['leader_travel_sponge'][0]} without the "
+              f"leader spring; rigid {TELEOP['leader_travel_rigid_spring'][0]} with it)")
 
 
 if __name__ == "__main__":
