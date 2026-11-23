@@ -5607,13 +5607,11 @@ right. Pole pairs (7) and PPR are known to be correct.
 - Nothing about P2P changed. CHANGE 11 is diagnostic only, and the
   SET_PARAMs are re-sent on every run.
 
-**Remaining:** It needs a blocked shaft: A
-  against the rigid stop, and/or B held firmly.
-  `motor_params.py stall --node A --sign ±1`; `stall --node B` (both signs, hand-held).
+**Remaining:**
 - **Ls** needs a 16 kHz current-step capture (not in the firmware).
 - The multimeter phase-to-phase check above.
 
-Logs: `logs/motor_params_spin_{B,A}_20261123_*.csv/.json` on the Pi.
+Logs: `logs/motor_params_{spin,stall}_{A,B}_20261123_*.csv/.json` on the Pi.
 
 ---
 
