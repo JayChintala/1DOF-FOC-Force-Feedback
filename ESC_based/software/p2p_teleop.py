@@ -363,6 +363,12 @@ def main():
             for n in names:
                 obs[n].set_model(cal_models[n], args.ripple)
             time.sleep(0.3)   # let the shafts settle after the sweep
+        if args.surface in ("rigid", "sponge"):
+            # The cal sweep swings A 1.25 turns, so the surface goes in after it.
+            for iface in ifaces.values():
+                iface.send_set_iq(0.0)
+            input(f"Place the {args.surface} {'stop' if args.surface == 'rigid' else ''} under A "
+                  "now (A just above it), then press Enter and take your hands off... ")
         print("HANDS OFF both shafts -- engaging once both are still...")
         for iface in ifaces.values():
             iface.send_couple_mode(COUPLE_MODE_P2P, COUPLE_FLAG_PREDICT if args.predict else 0)
