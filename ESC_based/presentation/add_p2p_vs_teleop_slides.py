@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-Adds the 2026-11-22 P2P-vs-teleop comparison to
+Updates the deck for the disturbance-observer P2P (2026-11-22): rewrites the old
+PEER slides (Peer-to-Peer Coupling, Peer-to-Peer: Measured, Two Approaches, the
+P2P line of Remaining Work) and adds the P2P-vs-teleop comparison to
 "Force-Aware Telepresence for Robot Learning.pptx", after "Two Approaches":
 
   P2P vs Teleop: Free Space      felt inertia and friction at the handle
@@ -268,6 +270,171 @@ def slide_scorecard(prs, model_table):
     run.font.color.rgb = GREY
 
 
+# ------------------------------------- edits: old PEER slides -> DOB P2P ----
+A_COL = RGBColor(0x2A, 0x6F, 0xDB)   # motor A / B colours of diagram_p2p_dob.png
+B_COL = RGBColor(0xD9, 0x68, 0x2C)
+
+
+def replace_caption(slide, text, notes):
+    box = [sh for sh in slide.shapes if sh.has_text_frame and sh.name.startswith("TextBox")][0]
+    p0 = box.text_frame.paragraphs[0]
+    p0.runs[0].text = text
+    for extra in p0.runs[1:]:
+        extra._r.getparent().remove(extra._r)
+    for extra in box.text_frame.paragraphs[1:]:
+        extra._p.getparent().remove(extra._p)
+    slide.notes_slide.notes_text_frame.text = notes
+
+
+def edit_peer_coupling(prs):
+    s = find(prs, "Peer-to-Peer Coupling")
+    old = [sh for sh in s.shapes if sh.shape_type == 13][0]          # the PEER diagram
+    geo = (old.left, old.top, old.width, old.height)
+    old._element.getparent().remove(old._element)
+    pic = s.shapes.add_picture(os.path.join(HERE, "diagram_p2p_dob.png"), *geo)
+    pic.name = "Peer-to-Peer Coupling figure"
+    replace_caption(
+        s,
+        "No leader, no follower: both ESCs run the same law at 1 kHz. Each runs a disturbance "
+        "observer for its own motor and for the other's (from its telemetry), which cancels "
+        "friction, cogging and gravity locally and leaves each side's external force. A force "
+        "channel keeps those forces equal and opposite; a position channel keeps the shafts aligned.",
+        "Keio-style acceleration-based 4-channel bilateral control (Ohnishi, Katsura, Shimono). "
+        "Firmware CHANGE 9 (P2P mode) and CHANGE 10 (in-session ripple/cogging calibration), "
+        "2026-11-18/19.\n\n"
+        "This replaced PEER mode, a plain spring-damper between the shafts, which felt springy: "
+        "a push had to stretch the spring before the other shaft moved, it saturated at 114 counts, "
+        "and stiffer gains hit a 57 Hz buzz. Here a push drives the common (force) mode - both "
+        "shafts accelerate together - and the observers' integral action drives the steady gap to "
+        "zero.\n\n"
+        "Kf sets the inertia the hand feels (apparent mass 2/Kf). Gains: wn 20 Hz, zeta 1, Kf 50 %, "
+        "observer 80 rad/s. Details: Peer_to_Peer/README.md and references there.")
+
+
+def _xy_chart(slide, box, title, t, series, y_title, number_format):
+    from pptx.chart.data import XyChartData
+    cd = XyChartData()
+    for name, ys in series:
+        sr = cd.add_series(name)
+        for x, y in zip(t, ys):
+            sr.add_data_point(x, y)
+    gf = slide.shapes.add_chart(XL_CHART_TYPE.XY_SCATTER_LINES_NO_MARKERS, *box, cd)
+    gf.name = title
+    ch = gf.chart
+    ch.has_title = True
+    ch.chart_title.text_frame.text = title
+    r = ch.chart_title.text_frame.paragraphs[0].runs[0]
+    r.font.size, r.font.bold, r.font.color.rgb = Pt(CHART_TITLE_PT), True, GREY
+    style_axes(ch, number_format)
+    ch.category_axis.tick_labels.number_format = "0"
+    ch.category_axis.tick_labels.number_format_is_linked = False
+    from pptx.enum.chart import XL_TICK_LABEL_POSITION
+    ch.category_axis.tick_label_position = XL_TICK_LABEL_POSITION.LOW   # below the plot, not on y = 0
+    ch.category_axis.minimum_scale = 0
+    ch.category_axis.maximum_scale = round(max(t))
+    ch.category_axis.has_title = True
+    ch.category_axis.axis_title.text_frame.text = "time (s)"
+    ch.value_axis.has_title = True
+    ch.value_axis.axis_title.text_frame.text = y_title
+    for ax in (ch.category_axis, ch.value_axis):
+        rr = ax.axis_title.text_frame.paragraphs[0].runs[0]
+        rr.font.size, rr.font.bold, rr.font.color.rgb = Pt(LABEL_PT), False, GREY
+    ch.has_legend = True
+    ch.legend.position = XL_LEGEND_POSITION.TOP
+    ch.legend.include_in_layout = False
+    ch.legend.font.size = Pt(LABEL_PT)
+    ch.legend.font.color.rgb = GREY
+    from pptx.enum.dml import MSO_LINE_DASH_STYLE
+    for sr, col, dash in zip(ch.plots[0].series, (A_COL, B_COL), (None, MSO_LINE_DASH_STYLE.DASH)):
+        sr.format.line.color.rgb = col
+        sr.format.line.width = Pt(2.25)
+        if dash:
+            sr.format.line.dash_style = dash
+        sr.smooth = False
+    return ch
+
+
+def edit_peer_measured(prs):
+    import json
+    d = json.load(open(os.path.join(HERE, "p2p_measured_window.json")))
+    s = find(prs, "Peer-to-Peer: Measured")
+    old = [sh for sh in s.shapes if sh.shape_type == 13][0]
+    old._element.getparent().remove(old._element)
+    _xy_chart(s, CHART_L, "Free motion: both shafts move together", d["free_t_s"],
+              [("Motor A", d["free_pos_A_deg"]), ("Motor B", d["free_pos_B_deg"])],
+              "angle (degrees)", "0")
+    _xy_chart(s, CHART_R, "Rigid presses: equal and opposite force", d["t_s"],
+              [("Force on A (object)", d["f_A_N"]), ("Force on B (hand), flipped", d["minus_f_B_N"])],
+              "force (N)", "0.0")
+    st, fs, cg = d["stats"], d["free_stats"], d["contact_gap"]
+    replace_caption(
+        s,
+        f"Left: 6 s of free motion — the shafts stay within {fs['gap_p95_counts']:.0f} counts "
+        f"(95th pct, ≈ {fs['gap_p95_counts'] * 0.09:.1f}°). Right: rigid presses — the object's force "
+        f"on A and the hand's on B match (corr {st['corr_fA_minus_fB']:.3f}, "
+        f"{st['mismatch_in_contact_pct']:.0f} % apart in contact). Once a press reaches the 0.8 A "
+        f"ceiling (0.84 N), A can't push harder and the handle slips past it.",
+        "Data: Peer_to_Peer/data/2026-11-22_p2p_vs_teleop_logs.zip; window extraction in "
+        "p2p_measured_window.json (" + d["free_source"] + "; " + d["source"] + "). Forces are the "
+        "firmware's observer outputs, replayed from the logged currents and encoders "
+        "(p2p_compare.py).\n\n"
+        f"Gap in contact: below the current ceiling median {cg['below_ceiling_p50']} counts (95th "
+        f"pct {cg['below_ceiling_p95']}); at or just after the ceiling median {cg['at_ceiling_p50']} "
+        f"(95th pct {cg['at_ceiling_p95']}) - the handle slips past the arm because the arm is "
+        "already pushing as hard as 0.8 A allows. Teleop has the same ceiling (its leader spring "
+        "is capped too).\n\n"
+        "Open: a ~20 Hz common-mode wobble hands-off (both shafts together), probably structural. "
+        "It is why Kf and the observer cutoff are backed off.")
+
+
+def edit_two_approaches(prs):
+    s = find(prs, "Two Approaches")
+    tbl = [sh for sh in s.shapes if sh.has_table][0].table
+    new = {
+        "The hand feels": ("estimated contact force", "the other side's force, via observers"),
+        "Free motion": ("light — 0.4–0.6× B's rotor", "1.9× B's rotor (Kf 50 %)"),
+        "Friction + gravity": ("cancelled by a fitted model", "cancelled per session (calibration sweep)"),
+        "Rigid vs soft": ("20× at the follower, 1.2× at the hand", "3.2× at A, 3.1× at the hand"),
+        "Hands off": ("stable", "stable; ≈ 20 Hz wobble"),
+    }
+    for ri in range(len(tbl.rows)):
+        key = tbl.cell(ri, 0).text.strip()
+        if key in new:
+            for ci, text in zip((1, 2), new[key]):
+                p0 = tbl.cell(ri, ci).text_frame.paragraphs[0]
+                p0.runs[0].text = text
+                for extra in p0.runs[1:]:
+                    extra._r.getparent().remove(extra._r)
+    replace_caption(
+        s,
+        "Two architectures, kept side by side. Leader–follower is lighter in free space because the "
+        "follower is powered and never loads the hand; peer-to-peer gives honest physics — a stiffer, "
+        "more readable contact with no designated master. Measured head to head on the next slides.",
+        "Leader-follower: the Pi runs the loop at 500 Hz; the follower tracks the leader, and the "
+        "follower's estimated contact force is played back on the leader, with a contact spring on "
+        "each side. Peer-to-peer: both ESCs at 1 kHz, disturbance observers, force and position "
+        "channels (CHANGE 9/10).\n\n"
+        "Rigid vs soft: leader-follower measures 20x apart at the follower but only 1.24x in leader "
+        "travel (2026-10-29, before the leader spring). P2P: 3.2x at A and 3.1x in handle travel "
+        "(2026-11-22). The soft object in the P2P run may have been the squishy foam rather than "
+        "the sponge.\n\n"
+        "Friction + gravity in P2P: a hands-off calibration sweep after every START fits each "
+        "motor's ripple, cogging, Coulomb friction and (on arm A) gravity; the firmware cancels "
+        "them.")
+
+
+def edit_remaining_work(prs):
+    s = find(prs, "Remaining Work")
+    body = [sh for sh in s.shapes
+            if sh.has_text_frame and sh.name.startswith("Content Placeholder")][0]
+    for para in body.text_frame.paragraphs:
+        if para.text.startswith("Peer-to-peer"):
+            para.runs[0].text = ("Peer-to-peer: find the ≈ 20 Hz wobble so the force gain and "
+                                 "observer can go back up — lighter free space, crisper taps")
+            for extra in para.runs[1:]:
+                extra._r.getparent().remove(extra._r)
+
+
 def main():
     if not os.path.exists(BACKUP):
         shutil.copy2(DECK, BACKUP)
@@ -275,6 +442,10 @@ def main():
     shutil.copy2(BACKUP, DECK)          # always start pristine
 
     prs = Presentation(DECK)
+    edit_peer_coupling(prs);  print("edited  Peer-to-Peer Coupling")
+    edit_peer_measured(prs);  print("edited  Peer-to-Peer: Measured")
+    edit_two_approaches(prs); print("edited  Two Approaches")
+    edit_remaining_work(prs); print("edited  Remaining Work")
     model_table = [sh for sh in find(prs, "Two Approaches").shapes if sh.has_table][0].table
     plan = [
         ("Two Approaches", lambda: slide_free(prs)),
